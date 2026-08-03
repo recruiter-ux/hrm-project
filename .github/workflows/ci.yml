@@ -1,0 +1,85 @@
+# =============================================================================
+# [PROJECT_NAME] — Continuous Integration
+#
+# Runs automatically on GitHub every time you push or open a pull request.
+# It does NOT deploy anything. It only answers one question:
+# "does this code still lint and build?"
+#
+# You can watch runs under the "Actions" tab of the GitHub repo.
+# A green tick means the checks passed; a red cross means something broke.
+#
+# No database is needed here — `prisma generate` only reads the schema file,
+# and neither app connects to Postgres at build time.
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Lets you trigger a run by hand from the Actions tab.
+  workflow_dispatch:
+
+# If you push twice quickly, cancel the older run instead of queueing both.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '24'
+  # Prisma insists on a syntactically valid connection string even for commands
+  # that never open a connection. This is a dummy value; nothing connects to it.
+  DATABASE_URL: 'postgresql://ci:ci@localhost:5432/ci?schema=public'
+
+jobs:
+  verify:
+    name: Lint & Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        # `npm ci` is the strict, reproducible install, but it requires
+        # package-lock.json to be committed. On a brand-new repo where the
+        # lockfile has not been pushed yet, fall back to `npm install` so the
+        # very first CI run still gives useful feedback.
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            echo "::warning::package-lock.json not found — falling back to 'npm install'. Commit the lockfile for reproducible builds."
+            npm install
+          fi
+
+      - name: Generate Prisma client
+        # Must run before the API is compiled: the generated client provides
+        # the TypeScript types that src/ imports from '@prisma/client'.
+        run: npx prisma generate --schema apps/api/prisma/schema.prisma
+
+      - name: Validate Prisma schema
+        run: npx prisma validate --schema apps/api/prisma/schema.prisma
+
+      - name: Check formatting
+        # Advisory only — a formatting nit should not block a build.
+        # Fix any warnings locally with `npm run format`. Once the codebase has
+        # been formatted once and everyone has Prettier in their editor, you can
+        # delete this line to make formatting a hard requirement.
+        continue-on-error: true
+        run: npm run format:check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build

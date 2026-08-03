@@ -1,0 +1,65 @@
+# =============================================================================
+# [PROJECT_NAME] — local development infrastructure
+#
+# This file runs ONLY the databases, not the application. You run the API and
+# web app on your machine with `npm run dev` so that code changes reload
+# instantly.
+#
+#   Start:   npm run db:up      (or: docker compose up -d --wait)
+#   Stop:    npm run db:down
+#   Wipe:    npm run db:nuke    (deletes all data — you will need to re-migrate)
+#
+# `--wait` blocks until both healthchecks below pass, so the next command in a
+# script can safely assume the database is accepting connections.
+# =============================================================================
+
+name: project-name
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: project-name-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-localdevpassword}
+      POSTGRES_DB: ${POSTGRES_DB:-project_name_dev}
+      # Makes text sorting/comparison deterministic across machines.
+      POSTGRES_INITDB_ARGS: '--encoding=UTF8 --locale=C'
+    ports:
+      # HOST:CONTAINER — if port 5432 is already taken on your machine, set
+      # POSTGRES_PORT=5433 in .env and update DATABASE_URL to match.
+      - '${POSTGRES_PORT:-5432}:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-project_name_dev}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: project-name-redis
+    restart: unless-stopped
+    # appendonly makes Redis persist to disk. Not strictly needed for a cache,
+    # but the notification/job queue in a later phase will want durability.
+    command: ['redis-server', '--appendonly', 'yes']
+    ports:
+      - '${REDIS_PORT:-6379}:6379'
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  postgres-data:
+    name: project-name-postgres-data
+  redis-data:
+    name: project-name-redis-data
