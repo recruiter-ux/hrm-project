@@ -179,9 +179,17 @@ How it works:
 
 > ⚠️ **One database rule Prisma cannot express.** Prisma has no syntax for a
 > partial unique index, so "only one open assignment per employee" must be added
-> by hand to the first generated migration. The exact SQL is in the comment
-> block above the model in `schema.prisma`. Without it, a bug can leave someone
-> with two current jobs and every headcount report silently double-counts them.
+> by hand to the first migration — and it has to go in **before** that migration
+> is applied:
+>
+> 1. `npm run prisma:migrate -- --create-only` (writes the SQL, does not run it)
+> 2. append the `CREATE UNIQUE INDEX … WHERE "effective_to" IS NULL` statement
+>    quoted in `schema.prisma` above the model
+> 3. `npm run prisma:migrate` (applies the edited file)
+>
+> A plain `migrate dev` writes *and* applies in one step, leaving nothing to
+> edit. Without the index, a bug can leave someone with two current jobs and
+> every headcount report silently double-counts them.
 
 ### Role — job titles
 

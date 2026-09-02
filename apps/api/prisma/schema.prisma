@@ -281,16 +281,25 @@ model Employee {
 //
 // ⚠️ DATABASE CONSTRAINT THAT PRISMA CANNOT EXPRESS
 // Prisma has no syntax for a partial (filtered) unique index, so the
-// "only one open assignment per employee" rule must be added by hand. After
-// running `npm run prisma:migrate` for the first time, open the generated file
-// under prisma/migrations/<timestamp>_.../migration.sql and append:
+// "only one open assignment per employee" rule must be added by hand.
 //
-//   CREATE UNIQUE INDEX "employment_assignments_one_current_per_employee"
-//     ON "employment_assignments" ("employee_id")
-//     WHERE "effective_to" IS NULL;
+// The SQL must go into the migration BEFORE that migration is applied, so use
+// the two-step flow (a normal `migrate dev` writes AND applies in one go,
+// leaving nothing to edit):
 //
-// Then re-run the migrate command. Without this, a bug can leave an employee
-// with two "current" jobs and every report silently double-counts them.
+//   1. npm run prisma:migrate -- --create-only
+//        Writes prisma/migrations/<timestamp>_<name>/migration.sql, unapplied.
+//   2. Open that migration.sql and append:
+//
+//        CREATE UNIQUE INDEX "employment_assignments_one_current_per_employee"
+//          ON "employment_assignments" ("employee_id")
+//          WHERE "effective_to" IS NULL;
+//
+//   3. npm run prisma:migrate
+//        Applies the edited file.
+//
+// Without this index, a bug can leave an employee with two "current" jobs and
+// every headcount report silently double-counts them.
 // =============================================================================
 
 model EmploymentAssignment {
