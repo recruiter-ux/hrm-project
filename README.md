@@ -125,8 +125,14 @@ npm run prisma:studio
 ```
 
 This opens a spreadsheet-like database browser at <http://localhost:5555>.
-Click **employees** and you should see 7 sample Hazel Mobile staff. Close it
-with `Ctrl + C` when done.
+Click **employees** and you should see 7 sample Hazel Mobile staff.
+
+Then click **employment_assignments** — 12 rows showing each person's career
+history: who was promoted, who moved department, and who converted from intern
+to full-time. That table is the reason the system can answer "which department
+was this person in last March?".
+
+Close Studio with `Ctrl + C` when done.
 
 ---
 

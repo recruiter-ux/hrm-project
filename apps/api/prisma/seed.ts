@@ -11,9 +11,19 @@
  * stable natural key, so running it twice does not create duplicates.
  *
  * This is DEVELOPMENT data. It is not a migration and never runs in production.
+ *
+ * Remember the two similar-sounding concepts:
+ *   Role       = job title      ("Software Engineer")
+ *   AccessRole = permission set ("HR Administrator")
  * =============================================================================
  */
-import { PermissionScope, PrismaClient } from '@prisma/client';
+import {
+  AssignmentChangeReason,
+  EmploymentType,
+  PermissionScope,
+  PrismaClient,
+  WorkLocationType,
+} from '@prisma/client';
 
 const prisma = new PrismaClient();
 
@@ -32,12 +42,29 @@ const PERMISSIONS: Array<{
 }> = [
   { resource: 'employee', action: 'read', module: 'core_hr', description: 'View employee records' },
   { resource: 'employee', action: 'create', module: 'core_hr', description: 'Add new employees' },
-  { resource: 'employee', action: 'update', module: 'core_hr', description: 'Edit employee records' },
+  {
+    resource: 'employee',
+    action: 'update',
+    module: 'core_hr',
+    description: 'Edit employee records',
+  },
   {
     resource: 'employee',
     action: 'delete',
     module: 'core_hr',
     description: 'Archive employee records',
+  },
+  {
+    resource: 'employment_assignment',
+    action: 'read',
+    module: 'core_hr',
+    description: 'View employment and career history',
+  },
+  {
+    resource: 'employment_assignment',
+    action: 'create',
+    module: 'core_hr',
+    description: 'Record promotions, transfers, and other job changes',
   },
   { resource: 'department', action: 'read', module: 'core_hr', description: 'View departments' },
   {
@@ -46,7 +73,19 @@ const PERMISSIONS: Array<{
     module: 'core_hr',
     description: 'Create and edit departments',
   },
-  { resource: 'document', action: 'read', module: 'core_hr', description: 'View employee documents' },
+  { resource: 'role', action: 'read', module: 'core_hr', description: 'View job titles' },
+  {
+    resource: 'role',
+    action: 'manage',
+    module: 'core_hr',
+    description: 'Create and edit job titles',
+  },
+  {
+    resource: 'document',
+    action: 'read',
+    module: 'core_hr',
+    description: 'View employee documents',
+  },
   { resource: 'document', action: 'upload', module: 'core_hr', description: 'Upload documents' },
   {
     resource: 'document',
@@ -54,23 +93,28 @@ const PERMISSIONS: Array<{
     module: 'core_hr',
     description: 'View documents marked confidential',
   },
-  { resource: 'role', action: 'read', module: 'core_hr', description: 'View access roles' },
   {
-    resource: 'role',
+    resource: 'access_role',
+    action: 'read',
+    module: 'core_hr',
+    description: 'View access roles and their permissions',
+  },
+  {
+    resource: 'access_role',
     action: 'manage',
     module: 'core_hr',
-    description: 'Create roles and assign permissions',
+    description: 'Grant access roles and edit permissions',
   },
 ];
 
 // -----------------------------------------------------------------------------
-// 2. ROLES
+// 2. ACCESS ROLES — what people may DO in the software.
 //
 // `scope` is what makes one permission mean different things to different
-// roles. A manager and an HR admin both hold `employee:read` — the manager
-// sees their direct reports, HR sees everyone.
+// access roles. A manager and an HR admin both hold `employee:read` — the
+// manager sees their direct reports, HR sees everyone.
 // -----------------------------------------------------------------------------
-const ROLES: Array<{
+const ACCESS_ROLES: Array<{
   key: string;
   name: string;
   description: string;
@@ -94,12 +138,16 @@ const ROLES: Array<{
       { permission: 'employee:create', scope: PermissionScope.GLOBAL },
       { permission: 'employee:update', scope: PermissionScope.GLOBAL },
       { permission: 'employee:delete', scope: PermissionScope.GLOBAL },
+      { permission: 'employment_assignment:read', scope: PermissionScope.GLOBAL },
+      { permission: 'employment_assignment:create', scope: PermissionScope.GLOBAL },
       { permission: 'department:read', scope: PermissionScope.GLOBAL },
       { permission: 'department:manage', scope: PermissionScope.GLOBAL },
+      { permission: 'role:read', scope: PermissionScope.GLOBAL },
+      { permission: 'role:manage', scope: PermissionScope.GLOBAL },
       { permission: 'document:read', scope: PermissionScope.GLOBAL },
       { permission: 'document:upload', scope: PermissionScope.GLOBAL },
       { permission: 'document:read_confidential', scope: PermissionScope.GLOBAL },
-      { permission: 'role:read', scope: PermissionScope.GLOBAL },
+      { permission: 'access_role:read', scope: PermissionScope.GLOBAL },
     ],
   },
   {
@@ -109,7 +157,9 @@ const ROLES: Array<{
     grants: [
       { permission: 'employee:read', scope: PermissionScope.DEPARTMENT },
       { permission: 'employee:update', scope: PermissionScope.DEPARTMENT },
+      { permission: 'employment_assignment:read', scope: PermissionScope.DEPARTMENT },
       { permission: 'department:read', scope: PermissionScope.DEPARTMENT },
+      { permission: 'role:read', scope: PermissionScope.GLOBAL },
       { permission: 'document:read', scope: PermissionScope.DEPARTMENT },
     ],
   },
@@ -119,17 +169,31 @@ const ROLES: Array<{
     description: 'Manages direct reports. Will approve leave and attendance exceptions.',
     grants: [
       { permission: 'employee:read', scope: PermissionScope.TEAM },
+      { permission: 'employment_assignment:read', scope: PermissionScope.TEAM },
       { permission: 'department:read', scope: PermissionScope.DEPARTMENT },
+      { permission: 'role:read', scope: PermissionScope.GLOBAL },
       { permission: 'document:read', scope: PermissionScope.TEAM },
+    ],
+  },
+  {
+    key: 'recruiter',
+    name: 'Recruiter',
+    description: 'Hiring access. Expands considerably when the ATS module lands.',
+    grants: [
+      { permission: 'employee:read', scope: PermissionScope.GLOBAL },
+      { permission: 'department:read', scope: PermissionScope.GLOBAL },
+      { permission: 'role:read', scope: PermissionScope.GLOBAL },
     ],
   },
   {
     key: 'employee',
     name: 'Employee',
-    description: 'Baseline role held by everyone. Self-service access only.',
+    description: 'Baseline access held by everyone. Self-service only.',
     grants: [
       { permission: 'employee:read', scope: PermissionScope.SELF },
+      { permission: 'employment_assignment:read', scope: PermissionScope.SELF },
       { permission: 'department:read', scope: PermissionScope.GLOBAL },
+      { permission: 'role:read', scope: PermissionScope.GLOBAL },
       { permission: 'document:read', scope: PermissionScope.SELF },
       { permission: 'document:upload', scope: PermissionScope.SELF },
     ],
@@ -137,7 +201,85 @@ const ROLES: Array<{
 ];
 
 // -----------------------------------------------------------------------------
-// 3. DEPARTMENTS — `parent` refers to another department's `code`.
+// 3. ROLES — job titles. What people are employed to DO.
+//
+// `level` is a plain number (1 = most junior) rather than an enum, so the
+// company can re-map its levelling without a database migration.
+// -----------------------------------------------------------------------------
+const JOB_TITLES: Array<{
+  code: string;
+  title: string;
+  jobFamily: string;
+  level: number;
+  description: string;
+}> = [
+  {
+    code: 'CEO',
+    title: 'Chief Executive Officer',
+    jobFamily: 'Leadership',
+    level: 10,
+    description: 'Sets company direction and is accountable to the board.',
+  },
+  {
+    code: 'VP_ENG',
+    title: 'VP of Engineering',
+    jobFamily: 'Engineering',
+    level: 8,
+    description: 'Owns engineering strategy, delivery, and hiring.',
+  },
+  {
+    code: 'HEAD_PEOPLE',
+    title: 'Head of People',
+    jobFamily: 'People',
+    level: 8,
+    description: 'Owns HR, recruitment, and internal operations.',
+  },
+  {
+    code: 'ENG_LEAD',
+    title: 'Engineering Lead',
+    jobFamily: 'Engineering',
+    level: 6,
+    description: 'Leads a delivery team; part hands-on, part people management.',
+  },
+  {
+    code: 'SR_SWE',
+    title: 'Senior Software Engineer',
+    jobFamily: 'Engineering',
+    level: 5,
+    description: 'Delivers complex work independently and mentors others.',
+  },
+  {
+    code: 'SWE',
+    title: 'Software Engineer',
+    jobFamily: 'Engineering',
+    level: 4,
+    description: 'Delivers well-defined work with review.',
+  },
+  {
+    code: 'AI_ENG',
+    title: 'AI Engineer',
+    jobFamily: 'Engineering',
+    level: 4,
+    description: 'Builds and evaluates applied ML and LLM features.',
+  },
+  {
+    code: 'PRODUCT_DESIGNER',
+    title: 'Product Designer',
+    jobFamily: 'Design',
+    level: 4,
+    description: 'Owns product interaction and visual design.',
+  },
+  {
+    code: 'RECRUITER',
+    title: 'Recruiter',
+    jobFamily: 'People',
+    level: 4,
+    description: 'Runs hiring pipelines end to end.',
+  },
+];
+
+// -----------------------------------------------------------------------------
+// 4. DEPARTMENTS — `parent` refers to another department's `code`.
 // -----------------------------------------------------------------------------
 const DEPARTMENTS: Array<{
   code: string;
@@ -154,105 +296,238 @@ const DEPARTMENTS: Array<{
 ];
 
 // -----------------------------------------------------------------------------
-// 4. EMPLOYEES — `manager` refers to another employee's `employeeNumber`.
-//    Ordered so that every manager is created before their reports.
+// 5. EMPLOYEES, each with their full employment history.
+//
+// The entry with `to: null` is the CURRENT arrangement — exactly one per
+// person — and is what gets cached onto the Employee row.
+//
+// The sample history deliberately covers three kinds of change so you can see
+// the table working: a promotion, a department move, and an intern converting
+// to full-time.
+//
+// Ordered so that every manager is created before their reports.
 // -----------------------------------------------------------------------------
+interface HistoryEntry {
+  role: string; // Role.code
+  department: string; // Department.code
+  manager: string | null; // Employee.employeeNumber
+  employmentType: EmploymentType;
+  workLocationType: WorkLocationType;
+  from: string;
+  to: string | null;
+  reason: AssignmentChangeReason;
+  notes?: string;
+}
+
 const EMPLOYEES: Array<{
   employeeNumber: string;
   firstName: string;
   lastName: string;
   workEmail: string;
-  jobTitle: string;
-  department: string;
-  manager?: string;
   hiredAt: string;
-  roles: string[];
+  accessRoles: string[];
   headOf?: string;
-  workLocationType?: 'ONSITE' | 'REMOTE' | 'HYBRID';
+  history: HistoryEntry[];
 }> = [
   {
     employeeNumber: 'HM-0001',
     firstName: 'Ayesha',
     lastName: 'Rahman',
     workEmail: 'ayesha.rahman@hazelmobile.com',
-    jobTitle: 'Chief Executive Officer',
-    department: 'EXEC',
     hiredAt: '2019-03-01',
-    roles: ['super_admin', 'employee'],
+    accessRoles: ['super_admin', 'employee'],
     headOf: 'EXEC',
+    history: [
+      {
+        role: 'CEO',
+        department: 'EXEC',
+        manager: null,
+        employmentType: EmploymentType.FULL_TIME,
+        workLocationType: WorkLocationType.ONSITE,
+        from: '2019-03-01',
+        to: null,
+        reason: AssignmentChangeReason.HIRE,
+        notes: 'Founder.',
+      },
+    ],
   },
   {
     employeeNumber: 'HM-0002',
     firstName: 'Bilal',
     lastName: 'Khan',
     workEmail: 'bilal.khan@hazelmobile.com',
-    jobTitle: 'VP of Engineering',
-    department: 'ENG',
-    manager: 'HM-0001',
     hiredAt: '2020-06-15',
-    roles: ['department_head', 'manager', 'employee'],
+    accessRoles: ['department_head', 'manager', 'employee'],
     headOf: 'ENG',
-    workLocationType: 'HYBRID',
+    history: [
+      {
+        role: 'ENG_LEAD',
+        department: 'ENG',
+        manager: 'HM-0001',
+        employmentType: EmploymentType.FULL_TIME,
+        workLocationType: WorkLocationType.ONSITE,
+        from: '2020-06-15',
+        to: '2021-12-31',
+        reason: AssignmentChangeReason.HIRE,
+      },
+      {
+        role: 'VP_ENG',
+        department: 'ENG',
+        manager: 'HM-0001',
+        employmentType: EmploymentType.FULL_TIME,
+        workLocationType: WorkLocationType.HYBRID,
+        from: '2022-01-01',
+        to: null,
+        reason: AssignmentChangeReason.PROMOTION,
+        notes: 'Promoted to VP as the engineering org grew past 15 people.',
+      },
+    ],
   },
   {
     employeeNumber: 'HM-0003',
     firstName: 'Sana',
     lastName: 'Iqbal',
     workEmail: 'sana.iqbal@hazelmobile.com',
-    jobTitle: 'Head of People',
-    department: 'PEOPLE',
-    manager: 'HM-0001',
     hiredAt: '2021-01-11',
-    roles: ['hr_admin', 'department_head', 'employee'],
+    accessRoles: ['hr_admin', 'department_head', 'employee'],
     headOf: 'PEOPLE',
+    history: [
+      {
+        role: 'HEAD_PEOPLE',
+        department: 'PEOPLE',
+        manager: 'HM-0001',
+        employmentType: EmploymentType.FULL_TIME,
+        workLocationType: WorkLocationType.ONSITE,
+        from: '2021-01-11',
+        to: null,
+        reason: AssignmentChangeReason.HIRE,
+      },
+    ],
   },
   {
     employeeNumber: 'HM-0004',
     firstName: 'Omar',
     lastName: 'Farooq',
     workEmail: 'omar.farooq@hazelmobile.com',
-    jobTitle: 'Mobile Engineering Lead',
-    department: 'ENG-MOB',
-    manager: 'HM-0002',
     hiredAt: '2021-09-06',
-    roles: ['manager', 'employee'],
+    accessRoles: ['manager', 'employee'],
     headOf: 'ENG-MOB',
-    workLocationType: 'HYBRID',
+    history: [
+      {
+        role: 'SR_SWE',
+        department: 'ENG',
+        manager: 'HM-0002',
+        employmentType: EmploymentType.FULL_TIME,
+        workLocationType: WorkLocationType.ONSITE,
+        from: '2021-09-06',
+        to: '2023-03-31',
+        reason: AssignmentChangeReason.HIRE,
+      },
+      {
+        role: 'ENG_LEAD',
+        department: 'ENG-MOB',
+        manager: 'HM-0002',
+        employmentType: EmploymentType.FULL_TIME,
+        workLocationType: WorkLocationType.HYBRID,
+        from: '2023-04-01',
+        to: null,
+        reason: AssignmentChangeReason.PROMOTION,
+        notes: 'Promoted to lead the newly formed Mobile Engineering team.',
+      },
+    ],
   },
   {
     employeeNumber: 'HM-0005',
     firstName: 'Zara',
     lastName: 'Ahmed',
     workEmail: 'zara.ahmed@hazelmobile.com',
-    jobTitle: 'Senior iOS Engineer',
-    department: 'ENG-MOB',
-    manager: 'HM-0004',
     hiredAt: '2022-04-18',
-    roles: ['employee'],
-    workLocationType: 'REMOTE',
+    accessRoles: ['employee'],
+    history: [
+      {
+        role: 'SWE',
+        department: 'ENG',
+        manager: 'HM-0002',
+        employmentType: EmploymentType.FULL_TIME,
+        workLocationType: WorkLocationType.ONSITE,
+        from: '2022-04-18',
+        to: '2023-03-31',
+        reason: AssignmentChangeReason.HIRE,
+      },
+      {
+        role: 'SWE',
+        department: 'ENG-MOB',
+        manager: 'HM-0004',
+        employmentType: EmploymentType.FULL_TIME,
+        workLocationType: WorkLocationType.REMOTE,
+        from: '2023-04-01',
+        to: '2023-12-31',
+        reason: AssignmentChangeReason.REORGANISATION,
+        notes: 'Moved into Mobile Engineering when the team was split out.',
+      },
+      {
+        role: 'SR_SWE',
+        department: 'ENG-MOB',
+        manager: 'HM-0004',
+        employmentType: EmploymentType.FULL_TIME,
+        workLocationType: WorkLocationType.REMOTE,
+        from: '2024-01-01',
+        to: null,
+        reason: AssignmentChangeReason.PROMOTION,
+      },
+    ],
   },
   {
     employeeNumber: 'HM-0006',
     firstName: 'Hassan',
     lastName: 'Malik',
     workEmail: 'hassan.malik@hazelmobile.com',
-    jobTitle: 'AI Engineer',
-    department: 'ENG-AI',
-    manager: 'HM-0002',
     hiredAt: '2023-02-27',
-    roles: ['employee'],
-    workLocationType: 'REMOTE',
+    accessRoles: ['employee'],
+    history: [
+      {
+        role: 'AI_ENG',
+        department: 'ENG-AI',
+        manager: 'HM-0002',
+        employmentType: EmploymentType.INTERN,
+        workLocationType: WorkLocationType.ONSITE,
+        from: '2023-02-27',
+        to: '2023-08-31',
+        reason: AssignmentChangeReason.HIRE,
+        notes: 'Six-month internship.',
+      },
+      {
+        role: 'AI_ENG',
+        department: 'ENG-AI',
+        manager: 'HM-0002',
+        employmentType: EmploymentType.FULL_TIME,
+        workLocationType: WorkLocationType.REMOTE,
+        from: '2023-09-01',
+        to: null,
+        reason: AssignmentChangeReason.EMPLOYMENT_TYPE_CHANGE,
+        notes: 'Converted from intern to full-time.',
+      },
+    ],
   },
   {
     employeeNumber: 'HM-0007',
     firstName: 'Fatima',
     lastName: 'Sheikh',
     workEmail: 'fatima.sheikh@hazelmobile.com',
-    jobTitle: 'Product Designer',
-    department: 'DESIGN',
-    manager: 'HM-0001',
     hiredAt: '2024-07-08',
-    roles: ['employee'],
+    accessRoles: ['employee'],
+    history: [
+      {
+        role: 'PRODUCT_DESIGNER',
+        department: 'DESIGN',
+        manager: 'HM-0001',
+        employmentType: EmploymentType.FULL_TIME,
+        workLocationType: WorkLocationType.HYBRID,
+        from: '2024-07-08',
+        to: null,
+        reason: AssignmentChangeReason.HIRE,
+      },
+    ],
   },
 ];
 
@@ -273,28 +548,60 @@ async function main(): Promise<void> {
       },
     });
   }
-  console.log(`  Permissions : ${PERMISSIONS.length}`);
+  console.log(`  Permissions  : ${PERMISSIONS.length}`);
 
-  // --- Roles + their permission grants ---------------------------------------
-  for (const role of ROLES) {
-    const created = await prisma.role.upsert({
-      where: { key: role.key },
-      update: { name: role.name, description: role.description, isSystem: true },
-      create: { key: role.key, name: role.name, description: role.description, isSystem: true },
+  // --- Access roles + their permission grants --------------------------------
+  for (const accessRole of ACCESS_ROLES) {
+    const created = await prisma.accessRole.upsert({
+      where: { key: accessRole.key },
+      update: { name: accessRole.name, description: accessRole.description, isSystem: true },
+      create: {
+        key: accessRole.key,
+        name: accessRole.name,
+        description: accessRole.description,
+        isSystem: true,
+      },
     });
 
-    for (const grant of role.grants) {
+    for (const grant of accessRole.grants) {
       const permission = await prisma.permission.findUnique({ where: { key: grant.permission } });
-      if (!permission) continue;
+      if (!permission) {
+        throw new Error(
+          `Access role "${accessRole.key}" references unknown permission "${grant.permission}".`,
+        );
+      }
 
-      await prisma.rolePermission.upsert({
-        where: { roleId_permissionId: { roleId: created.id, permissionId: permission.id } },
+      await prisma.accessRolePermission.upsert({
+        where: {
+          accessRoleId_permissionId: { accessRoleId: created.id, permissionId: permission.id },
+        },
         update: { scope: grant.scope },
-        create: { roleId: created.id, permissionId: permission.id, scope: grant.scope },
+        create: { accessRoleId: created.id, permissionId: permission.id, scope: grant.scope },
       });
     }
   }
-  console.log(`  Roles       : ${ROLES.length}`);
+  console.log(`  Access roles : ${ACCESS_ROLES.length}`);
+
+  // --- Job titles ------------------------------------------------------------
+  for (const job of JOB_TITLES) {
+    await prisma.role.upsert({
+      where: { code: job.code },
+      update: {
+        title: job.title,
+        jobFamily: job.jobFamily,
+        level: job.level,
+        description: job.description,
+      },
+      create: {
+        code: job.code,
+        title: job.title,
+        jobFamily: job.jobFamily,
+        level: job.level,
+        description: job.description,
+      },
+    });
+  }
+  console.log(`  Job titles   : ${JOB_TITLES.length}`);
 
   // --- Departments (parents first, so children can point at them) ------------
   for (const dept of DEPARTMENTS.filter((d) => !d.parent)) {
@@ -317,52 +624,114 @@ async function main(): Promise<void> {
       },
     });
   }
-  console.log(`  Departments : ${DEPARTMENTS.length}`);
+  console.log(`  Departments  : ${DEPARTMENTS.length}`);
 
   // --- Employees -------------------------------------------------------------
+  // Pass 1: the employee rows themselves, carrying the CURRENT arrangement.
   for (const emp of EMPLOYEES) {
-    const department = await prisma.department.findUnique({ where: { code: emp.department } });
-    const manager = emp.manager
-      ? await prisma.employee.findUnique({ where: { employeeNumber: emp.manager } })
+    const current = emp.history.find((h) => h.to === null);
+    if (!current) {
+      throw new Error(
+        `Employee ${emp.employeeNumber} has no current assignment (none with to: null).`,
+      );
+    }
+
+    const role = await prisma.role.findUnique({ where: { code: current.role } });
+    const department = await prisma.department.findUnique({ where: { code: current.department } });
+    const manager = current.manager
+      ? await prisma.employee.findUnique({ where: { employeeNumber: current.manager } })
       : null;
 
     const data = {
       firstName: emp.firstName,
       lastName: emp.lastName,
       workEmail: emp.workEmail,
-      jobTitle: emp.jobTitle,
       status: 'ACTIVE' as const,
-      workLocationType: emp.workLocationType ?? ('ONSITE' as const),
       hiredAt: new Date(emp.hiredAt),
+      roleId: role?.id ?? null,
       departmentId: department?.id ?? null,
       managerId: manager?.id ?? null,
+      employmentType: current.employmentType,
+      workLocationType: current.workLocationType,
     };
 
-    const employee = await prisma.employee.upsert({
+    await prisma.employee.upsert({
       where: { employeeNumber: emp.employeeNumber },
       update: data,
       create: { employeeNumber: emp.employeeNumber, ...data },
     });
+  }
+  console.log(`  Employees    : ${EMPLOYEES.length}`);
 
-    for (const roleKey of emp.roles) {
-      const role = await prisma.role.findUnique({ where: { key: roleKey } });
-      if (!role) continue;
+  // Pass 2: the full history. Done after every employee exists, because an
+  // assignment can reference any other employee as the manager.
+  let assignmentCount = 0;
+  for (const emp of EMPLOYEES) {
+    const employee = await prisma.employee.findUniqueOrThrow({
+      where: { employeeNumber: emp.employeeNumber },
+    });
 
-      await prisma.employeeRole.upsert({
-        where: { employeeId_roleId: { employeeId: employee.id, roleId: role.id } },
+    for (const entry of emp.history) {
+      const role = await prisma.role.findUniqueOrThrow({ where: { code: entry.role } });
+      const department = await prisma.department.findUniqueOrThrow({
+        where: { code: entry.department },
+      });
+      const manager = entry.manager
+        ? await prisma.employee.findUnique({ where: { employeeNumber: entry.manager } })
+        : null;
+
+      const effectiveFrom = new Date(entry.from);
+
+      const data = {
+        roleId: role.id,
+        departmentId: department.id,
+        managerId: manager?.id ?? null,
+        employmentType: entry.employmentType,
+        workLocationType: entry.workLocationType,
+        effectiveTo: entry.to ? new Date(entry.to) : null,
+        reason: entry.reason,
+        notes: entry.notes ?? null,
+      };
+
+      await prisma.employmentAssignment.upsert({
+        where: {
+          employeeId_effectiveFrom: { employeeId: employee.id, effectiveFrom },
+        },
+        update: data,
+        create: { employeeId: employee.id, effectiveFrom, ...data },
+      });
+      assignmentCount += 1;
+    }
+  }
+  console.log(`  Assignments  : ${assignmentCount}`);
+
+  // --- Access role grants ----------------------------------------------------
+  for (const emp of EMPLOYEES) {
+    const employee = await prisma.employee.findUniqueOrThrow({
+      where: { employeeNumber: emp.employeeNumber },
+    });
+
+    for (const key of emp.accessRoles) {
+      const accessRole = await prisma.accessRole.findUnique({ where: { key } });
+      if (!accessRole) {
+        throw new Error(`Employee ${emp.employeeNumber} references unknown access role "${key}".`);
+      }
+
+      await prisma.employeeAccessRole.upsert({
+        where: {
+          employeeId_accessRoleId: { employeeId: employee.id, accessRoleId: accessRole.id },
+        },
         update: {},
-        create: { employeeId: employee.id, roleId: role.id },
+        create: { employeeId: employee.id, accessRoleId: accessRole.id },
       });
     }
   }
-  console.log(`  Employees   : ${EMPLOYEES.length}`);
 
   // --- Department heads (done last: employees must exist first) --------------
   for (const emp of EMPLOYEES.filter((e) => e.headOf)) {
-    const employee = await prisma.employee.findUnique({
+    const employee = await prisma.employee.findUniqueOrThrow({
       where: { employeeNumber: emp.employeeNumber },
     });
-    if (!employee) continue;
 
     await prisma.department.update({
       where: { code: emp.headOf as string },
@@ -372,6 +741,7 @@ async function main(): Promise<void> {
 
   console.log('\nSeed complete.');
   console.log('Inspect the data visually with:  npm run prisma:studio');
+  console.log('Try the "employment_assignments" table to see career history.');
 }
 
 main()

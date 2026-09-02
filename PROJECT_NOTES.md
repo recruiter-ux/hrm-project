@@ -20,7 +20,8 @@ separate sessions. Favour clarity and explicit comments over cleverness.
 ### Built (Phase 0)
 
 - npm workspaces monorepo — NestJS API + Next.js web app
-- PostgreSQL schema for Core HR via Prisma (5 concepts, 7 tables)
+- PostgreSQL schema for Core HR via Prisma (9 tables), including effective-dated
+  employment history
 - Docker Compose for local Postgres + Redis
 - GitHub Actions CI (format, lint, build)
 - A health endpoint and a status page that prove the stack is wired together
@@ -101,8 +102,19 @@ A new backend module (say Leave) means:
 
 ## 4. The database schema in plain English
 
-Five concepts, seven tables. Two of the tables are join tables that exist to
-connect the others.
+Nine tables. Two are join tables that exist only to connect the others.
+
+> **The one thing to get straight before reading on.** Two words sound alike
+> and mean completely different things:
+>
+> | Table | Means | Example |
+> | --- | --- | --- |
+> | `Role` | A **job title** — what someone is employed to do | "Software Engineer", "Recruiter" |
+> | `AccessRole` | A **permission set** — what someone may do in this software | "HR Administrator", "Manager" |
+>
+> They are separate tables because they change independently. Promoting an
+> engineer to Senior must not silently grant them access to salary data, and
+> making someone an HR Administrator does not change their job.
 
 ### Employee — the centre of everything
 
@@ -118,11 +130,73 @@ Key points:
   self-reference: `Employee.managerId` points at another `Employee`. It is
   nullable because the CEO has no manager. Leave approval routing and
   attendance anomaly **escalation** both climb this chain upward.
-- **An employee belongs to at most one department** (`departmentId`).
+- **An employee belongs to at most one department** (`departmentId`) and holds
+  one job title (`roleId`).
+- **`workingTitle` is an optional free-text override.** Role says "Software
+  Engineer"; the business card can say "Software Engineer II, Platform". This
+  stops the `Role` table bloating with a near-duplicate row per person.
 - **`timezone` is on the employee, with a default.** A 9am shift is a different
   instant in every office; attendance is meaningless without it. It is here
   from day one because backfilling it after attendance data exists is painful.
 - **Employees are soft-deleted** (`deletedAt`), never removed — see §5.
+
+> ⚠️ **Five fields on `Employee` are a cache, not the source of truth.**
+> `roleId`, `departmentId`, `managerId`, `employmentType` and
+> `workLocationType` describe *today only*. The real record is
+> `EmploymentAssignment` — see below. Never write these five from anywhere
+> except the one service method that also writes an assignment row.
+
+### EmploymentAssignment — the career history
+
+**One row = "between these two dates, this person held this job title, in this
+department, reporting to this manager, on these terms."**
+
+This is what lets the system answer questions the `Employee` table cannot:
+
+- Which department was Ali in last March?
+- When was Zara promoted, and from what?
+- Who was this person's manager when they filed that leave request?
+
+Payroll and Reporting both need those answers, and **history cannot be
+reconstructed after the fact** — which is why this table exists before any real
+employee data is loaded.
+
+How it works:
+
+- **`effectiveTo = NULL` means "this is the current arrangement".**
+- **Exactly one row per employee may have `effectiveTo = NULL`.**
+- Changing someone's job means, **in one transaction**: close the current row
+  (set its `effectiveTo`), insert the new row, and update the cached fields on
+  `Employee`. All three steps live in a single service method.
+- **`reason`** (HIRE, PROMOTION, DEPARTMENT_TRANSFER, …) is what turns a list of
+  rows into a readable career history, and what Reporting groups by. Note
+  `DATA_CORRECTION` — it means "we fixed a typo", not a real-world event, so
+  reports must exclude it.
+- **Employment terms live here too** (`employmentType`, `workLocationType`),
+  because an intern converting to full-time is a career event Payroll must see.
+- **`status` deliberately does *not* live here.** It flips often (every leave of
+  absence), and would drown the genuine job changes in noise.
+
+> ⚠️ **One database rule Prisma cannot express.** Prisma has no syntax for a
+> partial unique index, so "only one open assignment per employee" must be added
+> by hand to the first generated migration. The exact SQL is in the comment
+> block above the model in `schema.prisma`. Without it, a bug can leave someone
+> with two current jobs and every headcount report silently double-counts them.
+
+### Role — job titles
+
+One row per job title the company recognises. Kept as a table rather than free
+text so that Recruitment can open a requisition against a defined role,
+Reporting can group headcount by role and job family, and Performance can hang
+career ladders off it.
+
+- **`jobFamily`** groups related titles ("Engineering", "People") for reporting
+  and career paths.
+- **`level` is a plain number, not an enum.** Every company reworks its
+  levelling eventually; a number can be re-mapped without a database migration,
+  and it sorts correctly, which an enum does not.
+- **Salary bands are deliberately absent.** That is Payroll, and compensation
+  data needs its own access controls.
 
 ### Department — the org chart
 
@@ -135,43 +209,28 @@ Key points:
 - Employee → Department and Department → Employee both exist, pointing in
   opposite directions. That is intentional, not a mistake.
 
-### Role and Permission — who can do what
+### AccessRole and Permission — who can do what in the software
 
-**Terminology, because this trips everyone up:**
-
-- **`Role` means an ACCESS role** — "HR Administrator", "Manager", "Employee".
-  What you may *do in the software*.
-- **A person's JOB title** ("Senior iOS Engineer") is `Employee.jobTitle`, a
-  plain text field.
-
-They are separate because they change independently: promoting an engineer to
-Senior should not grant access to salary data.
-
-> ⚠️ **Flag for the product owner:** the original brief listed "Role" alongside
-> "Permission", which reads as access control, so that is what was built. If
-> you meant Role as *job position/title* (with a proper `Position` table, job
-> descriptions, and salary bands feeding Recruitment), say so — `Role` gets
-> renamed to `AccessRole` and a separate `Position` table is added. Cheap to
-> change now, expensive after the Auth phase.
-
-How the pieces connect:
+Entirely separate from job titles. How the pieces connect:
 
 ```
-Employee ──(EmployeeRole)──> Role ──(RolePermission)──> Permission
+Employee ──(EmployeeAccessRole)──> AccessRole ──(AccessRolePermission)──> Permission
 ```
 
-- **A person can hold several roles at once** — a team lead who also recruits is
-  "Manager" + "Recruiter". Hence the `EmployeeRole` join table.
-- **A role holds many permissions, and a permission belongs to many roles.**
-  Hence `RolePermission`.
+- **A person can hold several access roles at once** — a team lead who also
+  recruits is "Manager" + "Recruiter". Hence the `EmployeeAccessRole` join
+  table, which also records **who granted the access and when** (the first
+  question any audit asks) and an optional `expiresAt` for temporary elevation.
+- **An access role holds many permissions, and a permission belongs to many
+  access roles.** Hence `AccessRolePermission`.
 - **Permissions are `resource` + `action`** (`leave_request:approve`), never
   free-form strings. Every future module registers its permissions the same
   way, so the admin screen can group hundreds of them automatically.
 
 #### The single most important design decision: `PermissionScope`
 
-`RolePermission` carries a `scope` column — `SELF`, `TEAM`, `DEPARTMENT`, or
-`GLOBAL`.
+`AccessRolePermission` carries a `scope` column — `SELF`, `TEAM`,
+`DEPARTMENT`, or `GLOBAL`.
 
 Plain English: *"can read employees"* is not one permission, it is four. HR
 reads everyone. A department head reads their department. A manager reads their
@@ -182,8 +241,15 @@ makes them mean different things. Without this column, Leave approval,
 Attendance visibility, and Payroll access all become hardcoded `if` statements
 scattered through the codebase.
 
-This is why `RolePermission` is an explicit table rather than Prisma's implicit
-many-to-many: an implicit join table cannot carry extra columns.
+This is why `AccessRolePermission` is an explicit table rather than Prisma's
+implicit many-to-many: an implicit join table cannot carry extra columns.
+
+#### Planned, not built: birthright access
+
+A `Role.defaultAccessRoles` link, so that hiring someone with the job title
+"Recruiter" automatically grants them the "Recruiter" access role. It is a pure
+join table and can be added later with no data migration, so it was left out of
+Phase 0. Until then, access is granted explicitly per person.
 
 ### Document — employee files
 
@@ -218,7 +284,12 @@ many-to-many: an implicit join table cannot carry extra columns.
 - **Prisma is camelCase, Postgres is snake_case,** bridged by `@map`/`@@map`.
   The Reporting module will have people writing raw SQL against these tables,
   and snake_case is the Postgres convention.
-- **Table names are plural** (`employees`, `role_permissions`).
+- **Table names are plural** (`employees`, `access_role_permissions`).
+- **`Employee`'s five assignment fields are a cache.** `roleId`,
+  `departmentId`, `managerId`, `employmentType`, `workLocationType` must only
+  ever be written by the same service method that writes an
+  `EmploymentAssignment` row, in one transaction. Writing them from anywhere
+  else silently desynchronises the history from the present.
 - **Soft delete via `deletedAt`.** HR records must be retained for tax, payroll,
   and audit reasons after someone leaves.
   ⚠️ **Prisma does not enforce this.** Every query must filter
@@ -256,19 +327,37 @@ many-to-many: an implicit join table cannot carry extra columns.
 
 Read this section before designing any new module.
 
-### No employment history (the big one)
+### The employment-history invariant is not enforced by code yet (the big one)
 
-`Employee.departmentId`, `managerId`, and `jobTitle` hold **current state only**.
-"Which department was Ali in during March?" cannot be answered.
+`EmploymentAssignment` exists and the schema is right, but **nothing yet stops
+it going wrong.** Two specific gaps:
 
-This is fine now because there is no production data, but Payroll and Reporting
-will both need it. The planned fix is an effective-dated
-`EmploymentAssignment` table (`employeeId`, `departmentId`, `managerId`,
-`jobTitle`, `effectiveFrom`, `effectiveTo`), with the columns on `Employee`
-kept as a fast cache of "current".
+1. **The partial unique index must be added by hand** to the first generated
+   migration — SQL is in `schema.prisma` above the model, and repeated in §4.
+   Until it exists, an employee can end up with two "current" assignments.
+2. **The transactional service method does not exist.** The seed writes the
+   `Employee` cache and the assignment rows in separate steps, which is fine for
+   fixed sample data but is *not* the pattern for real code.
 
-**Add this before real employee data is loaded** — history cannot be
-reconstructed after the fact.
+**Build `EmploymentAssignmentService.changeAssignment()` as the first piece of
+Core HR business logic**, before any screen can edit an employee. It must, in
+one transaction: close the open assignment, insert the new one, and update the
+five cached fields on `Employee`.
+
+### No status history
+
+`Employee.status` (PROBATION → ACTIVE → ON_LEAVE …) has no history table. This
+was deliberate — status flips far more often than job assignments and would
+drown the career history in noise. If "how long was this person on leave last
+year?" becomes a real question, derive it from the Leave module rather than
+adding status rows to `EmploymentAssignment`.
+
+### Employee is not the login entity
+
+When Auth is built, add a separate `User` table with an optional `employeeId`
+rather than putting passwords on `Employee`. They are genuinely different
+things: not every employee logs in (contractors, floor staff), and not every
+user is an employee (external recruiters, auditors, ATS candidates).
 
 ### Employee is not the login entity
 

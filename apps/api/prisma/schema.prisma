@@ -1,6 +1,6 @@
 // =============================================================================
 // [PROJECT_NAME] — Prisma schema
-// Phase 0: Core HR only — Employee, Department, Role, Document, Permission.
+// Phase 0: Core HR only.
 //
 // HOW TO READ THIS FILE
 //   - A `model` becomes one database table.
@@ -10,6 +10,14 @@
 //     these tables, and snake_case is the Postgres convention.
 //   - `?` after a type means the field is optional (nullable).
 //   - `@relation` defines a foreign key — a link between two tables.
+//
+// TWO WORDS THAT SOUND ALIKE — READ THIS BEFORE ANYTHING ELSE
+//   - `Role`       = a JOB TITLE. "Software Engineer", "Recruiter".
+//                    What the person is employed to do.
+//   - `AccessRole` = a PERMISSION GROUP. "HR Administrator", "Manager".
+//                    What the person may do inside this software.
+//   They are separate tables because they change independently: promoting an
+//   engineer to Senior must not silently grant access to salary data.
 //
 // AFTER EDITING THIS FILE, run:  npm run prisma:migrate
 // =============================================================================
@@ -32,19 +40,22 @@ datasource db {
 // =============================================================================
 
 /// Where an employee sits in the employment lifecycle.
-/// Attendance, Leave, and Payroll all branch on this, so it is intentionally
-/// richer than a simple active/inactive flag.
+///
+/// Deliberately NOT part of employment history (see EmploymentAssignment).
+/// Status flips often — every leave of absence would otherwise create a new
+/// assignment row and drown the genuine job changes.
 enum EmploymentStatus {
   PROBATION
   ACTIVE
-  ON_LEAVE // Long-term leave (parental, sabbatical, medical). Short leave lives in the Leave module.
+  ON_LEAVE
   NOTICE_PERIOD
   SUSPENDED
   TERMINATED
 }
 
-/// The contractual basis of employment. Drives leave accrual rules and, later,
-/// payroll treatment.
+/// The contractual basis of employment. Drives leave accrual and, later,
+/// payroll treatment. Changes over time (intern converting to full-time), so
+/// it is recorded on EmploymentAssignment as well.
 enum EmploymentType {
   FULL_TIME
   PART_TIME
@@ -59,6 +70,23 @@ enum WorkLocationType {
   ONSITE
   REMOTE
   HYBRID
+}
+
+/// Why an employment assignment changed. This is what turns a list of database
+/// rows into a readable career history, and it is what Reporting will group by
+/// to answer "how many promotions did Engineering make last year?".
+enum AssignmentChangeReason {
+  HIRE
+  PROMOTION
+  DEMOTION
+  LATERAL_MOVE // Same level, different job title.
+  DEPARTMENT_TRANSFER
+  MANAGER_CHANGE
+  EMPLOYMENT_TYPE_CHANGE // e.g. intern converting to full-time.
+  WORK_LOCATION_CHANGE
+  REORGANISATION // Org-wide restructure, not a personal change.
+  TERMINATION
+  DATA_CORRECTION // Fixing a mistake. NOT a real-world event — exclude from reports.
 }
 
 /// Categories of employee document. Used for filtering, retention policy, and
@@ -104,6 +132,15 @@ enum PermissionScope {
 // Almost every future module points at this table: Attendance records, Leave
 // requests, Payroll runs, Performance reviews, and ATS hires all reference an
 // Employee. That makes it the table most expensive to get wrong.
+//
+// ⚠️ CURRENT STATE vs HISTORY
+// The `roleId`, `departmentId`, `managerId`, `employmentType` and
+// `workLocationType` fields below are a CACHE of "how things stand today".
+// The full history lives in EmploymentAssignment.
+//
+// These five fields must ONLY ever be written by the same service method that
+// writes an assignment row, inside one transaction. See the big comment on
+// EmploymentAssignment.
 // =============================================================================
 
 model Employee {
@@ -139,38 +176,17 @@ model Employee {
   dateOfBirth DateTime? @map("date_of_birth") @db.Date
   nationalId  String?   @map("national_id")
 
-  // --- Employment facts -----------------------------------------------------
-  /// The person's job title, e.g. "Senior iOS Engineer".
-  ///
-  /// This is a plain text field, NOT the `Role` table. `Role` in this schema
-  /// means an ACCESS role (what you may do in the software). See the comment
-  /// above `model Role` for why the two are separate, and PROJECT_NOTES.md if
-  /// you intended `Role` to mean job title instead.
-  jobTitle String? @map("job_title")
+  // --- Current employment state (CACHE — see warning above) -----------------
+  /// Current job title, pointing at the Role table.
+  roleId String? @map("role_id")
+  role   Role?   @relation("EmployeeCurrentRole", fields: [roleId], references: [id], onDelete: Restrict)
 
-  status           EmploymentStatus @default(PROBATION)
-  employmentType   EmploymentType   @default(FULL_TIME) @map("employment_type")
-  workLocationType WorkLocationType @default(ONSITE) @map("work_location_type")
+  /// Optional free-text override for people whose card says something more
+  /// specific than the standard title — Role "Software Engineer", working
+  /// title "Software Engineer II, Platform". Stops the Role table bloating
+  /// with a near-duplicate row per person.
+  workingTitle String? @map("working_title")
 
-  /// IANA timezone, e.g. "Asia/Karachi". Attendance is meaningless without it:
-  /// a 9am shift is a different instant for every office. Defaulted rather than
-  /// left null because backfilling it after attendance data exists is painful.
-  timezone String @default("Asia/Karachi")
-
-  hiredAt      DateTime  @map("hired_at") @db.Date
-  /// End of probation. Drives the "confirmation due" dashboard widget.
-  probationEndsAt DateTime? @map("probation_ends_at") @db.Date
-  /// Last working day. Set on resignation/termination; `status` moves to
-  /// TERMINATED separately, because notice periods mean the two differ.
-  terminatedAt DateTime? @map("terminated_at") @db.Date
-
-  // --- Org structure --------------------------------------------------------
-  /// The employee's CURRENT department.
-  ///
-  /// Important: this is current state only, not history. "Which department was
-  /// Ali in during March?" cannot be answered from this column. A future
-  /// `EmploymentAssignment` table will hold the effective-dated history —
-  /// see PROJECT_NOTES.md → "Known schema limitation: no employment history".
   departmentId String?     @map("department_id")
   department   Department? @relation("DepartmentMembers", fields: [departmentId], references: [id], onDelete: SetNull)
 
@@ -182,6 +198,26 @@ model Employee {
   managerId String?    @map("manager_id")
   manager   Employee?  @relation("EmployeeReportingLine", fields: [managerId], references: [id], onDelete: SetNull)
   reports   Employee[] @relation("EmployeeReportingLine")
+
+  employmentType   EmploymentType   @default(FULL_TIME) @map("employment_type")
+  workLocationType WorkLocationType @default(ONSITE) @map("work_location_type")
+
+  // --- Lifecycle ------------------------------------------------------------
+  status EmploymentStatus @default(PROBATION)
+
+  /// IANA timezone, e.g. "Asia/Karachi". Attendance is meaningless without it:
+  /// a 9am shift is a different instant for every office. Defaulted rather than
+  /// left null because backfilling it after attendance data exists is painful.
+  timezone String @default("Asia/Karachi")
+
+  hiredAt DateTime @map("hired_at") @db.Date
+
+  /// End of probation. Drives the "confirmation due" dashboard widget.
+  probationEndsAt DateTime? @map("probation_ends_at") @db.Date
+
+  /// Last working day. Set on resignation/termination; `status` moves to
+  /// TERMINATED separately, because notice periods mean the two differ.
+  terminatedAt DateTime? @map("terminated_at") @db.Date
 
   // --- Soft delete ----------------------------------------------------------
   /// Employee records are NEVER hard-deleted. Tax law, payroll history, and
@@ -196,21 +232,174 @@ model Employee {
   updatedAt DateTime @updatedAt @map("updated_at")
 
   // --- Reverse relations (no columns; these exist so you can query both ways) ---
-  documents         Document[]     @relation("EmployeeDocuments")
-  uploadedDocuments Document[]     @relation("DocumentUploader")
-  roles             EmployeeRole[] @relation("EmployeeRoleAssignee")
-  rolesAssigned     EmployeeRole[] @relation("EmployeeRoleAssigner")
-  departmentsHeaded Department[]   @relation("DepartmentHead")
+  assignments         EmploymentAssignment[] @relation("AssignmentEmployee")
+  managedAssignments  EmploymentAssignment[] @relation("AssignmentManager")
+  recordedAssignments EmploymentAssignment[] @relation("AssignmentRecorder")
+  documents           Document[]             @relation("EmployeeDocuments")
+  uploadedDocuments   Document[]             @relation("DocumentUploader")
+  accessRoles         EmployeeAccessRole[]   @relation("AccessRoleAssignee")
+  accessRolesGranted  EmployeeAccessRole[]   @relation("AccessRoleGrantor")
+  departmentsHeaded   Department[]           @relation("DepartmentHead")
 
   // --- Indexes --------------------------------------------------------------
   // An index makes filtering on a column fast. These cover the queries the
   // dashboards and directory screens will run constantly.
   @@index([departmentId])
   @@index([managerId])
+  @@index([roleId])
   @@index([status])
   @@index([deletedAt])
   @@index([lastName, firstName])
   @@map("employees")
+}
+
+// =============================================================================
+// EMPLOYMENT ASSIGNMENT — the career history
+//
+// WHAT THIS IS, IN PLAIN ENGLISH
+// One row = "between these two dates, this person held this job title, in this
+// department, reporting to this manager, on these terms."
+//
+// WHY IT EXISTS
+// Without it, the database only knows where someone stands TODAY. Questions
+// like "which department was Ali in last March?", "when was Zara promoted?",
+// or "what was this person's manager when they filed that leave request?"
+// become unanswerable — and Payroll and Reporting both need those answers.
+//
+// History cannot be reconstructed after the fact, which is why this table
+// exists before any real employee data is loaded.
+//
+// HOW IT WORKS
+//   - `effectiveTo = NULL` means "this is the current arrangement".
+//   - Exactly ONE row per employee may have `effectiveTo = NULL`.
+//   - Changing someone's job means, in ONE transaction:
+//       1. set the current row's `effectiveTo` to the day before the change
+//       2. insert a new row with `effectiveFrom` = the change date
+//       3. update the cached fields on Employee to match the new row
+//     All three steps belong in a single service method. Never write those
+//     Employee fields from anywhere else.
+//
+// ⚠️ DATABASE CONSTRAINT THAT PRISMA CANNOT EXPRESS
+// Prisma has no syntax for a partial (filtered) unique index, so the
+// "only one open assignment per employee" rule must be added by hand. After
+// running `npm run prisma:migrate` for the first time, open the generated file
+// under prisma/migrations/<timestamp>_.../migration.sql and append:
+//
+//   CREATE UNIQUE INDEX "employment_assignments_one_current_per_employee"
+//     ON "employment_assignments" ("employee_id")
+//     WHERE "effective_to" IS NULL;
+//
+// Then re-run the migrate command. Without this, a bug can leave an employee
+// with two "current" jobs and every report silently double-counts them.
+// =============================================================================
+
+model EmploymentAssignment {
+  id String @id @default(cuid())
+
+  employeeId String   @map("employee_id")
+  employee   Employee @relation("AssignmentEmployee", fields: [employeeId], references: [id], onDelete: Cascade)
+
+  /// The job title held during this period. Required — an assignment with no
+  /// job is not a meaningful record.
+  roleId String @map("role_id")
+  role   Role   @relation("AssignmentRole", fields: [roleId], references: [id], onDelete: Restrict)
+
+  departmentId String     @map("department_id")
+  department   Department @relation("AssignmentDepartment", fields: [departmentId], references: [id], onDelete: Restrict)
+
+  /// Nullable — the CEO reports to nobody.
+  managerId String?   @map("manager_id")
+  manager   Employee? @relation("AssignmentManager", fields: [managerId], references: [id], onDelete: SetNull)
+
+  /// Employment terms are captured here too, because they genuinely change:
+  /// an intern converting to full-time is a career event Payroll must see.
+  employmentType   EmploymentType   @default(FULL_TIME) @map("employment_type")
+  workLocationType WorkLocationType @default(ONSITE) @map("work_location_type")
+
+  // --- The dates that make this "effective-dated" ---------------------------
+  /// First day this arrangement applied.
+  effectiveFrom DateTime @map("effective_from") @db.Date
+
+  /// Last day it applied. NULL means "still current".
+  effectiveTo DateTime? @map("effective_to") @db.Date
+
+  reason AssignmentChangeReason @default(HIRE)
+
+  /// Free text for context a dropdown cannot capture — "covering parental
+  /// leave for HM-0004", "role renamed in Q3 restructure".
+  notes String?
+
+  /// Who entered this record. Distinct from the employee it describes.
+  recordedById String?   @map("recorded_by_id")
+  recordedBy   Employee? @relation("AssignmentRecorder", fields: [recordedById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  /// An employee cannot start two different arrangements on the same day.
+  /// Doubles as the natural key that lets the seed script re-run safely.
+  @@unique([employeeId, effectiveFrom])
+  // Covers "give me this person's history, newest first" and the lookups that
+  // resolve "who was in department X on date D".
+  @@index([employeeId, effectiveTo])
+  @@index([departmentId, effectiveFrom])
+  @@index([managerId])
+  @@index([roleId])
+  @@map("employment_assignments")
+}
+
+// =============================================================================
+// ROLE — job titles
+//
+// One row per job title the company recognises: "Software Engineer",
+// "Recruiter", "Product Designer". NOT about software permissions — that is
+// AccessRole, further down.
+//
+// Kept as its own table rather than free text on Employee so that:
+//   - Recruitment can open a requisition against a defined role
+//   - Reporting can group headcount by role and job family
+//   - Performance can hang competencies and career ladders off it
+//   - Payroll can attach salary bands (deliberately not modelled yet)
+// =============================================================================
+
+model Role {
+  id String @id @default(cuid())
+
+  /// Stable machine code, e.g. "SWE", "SR_SWE", "RECRUITER". Safe to reference
+  /// in code and imports; never renamed once in use.
+  code String @unique
+
+  /// The human-readable job title as it appears on a contract.
+  title String
+
+  description String?
+
+  /// Groups related titles: "Engineering", "Design", "People", "Commercial".
+  /// Career ladders and headcount reports are organised by family, and it
+  /// avoids needing a separate table just to categorise a few dozen titles.
+  jobFamily String? @map("job_family")
+
+  /// Numeric seniority, e.g. 1 = Intern ... 8 = Executive. A plain number
+  /// rather than an enum because every company reworks its levelling and a
+  /// number can be re-mapped without a database migration. Sortable, which an
+  /// enum is not.
+  level Int?
+
+  /// Retire a title without deleting it — historical assignments still need to
+  /// resolve the name.
+  isActive Boolean @default(true) @map("is_active")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  /// Employees currently holding this title.
+  currentEmployees Employee[]             @relation("EmployeeCurrentRole")
+  /// Every period, past and present, in which anyone held this title.
+  assignments      EmploymentAssignment[] @relation("AssignmentRole")
+
+  @@index([jobFamily])
+  @@index([isActive])
+  @@map("roles")
 }
 
 // =============================================================================
@@ -253,7 +442,8 @@ model Department {
   createdAt DateTime  @default(now()) @map("created_at")
   updatedAt DateTime  @updatedAt @map("updated_at")
 
-  members Employee[] @relation("DepartmentMembers")
+  members     Employee[]             @relation("DepartmentMembers")
+  assignments EmploymentAssignment[] @relation("AssignmentDepartment")
 
   @@index([parentId])
   @@index([isActive])
@@ -261,44 +451,45 @@ model Department {
 }
 
 // =============================================================================
-// ROLE + PERMISSION — access control (RBAC)
+// ACCESS ROLE + PERMISSION — who can do what in the software
 //
-// TERMINOLOGY, because this trips everyone up:
-//   - `Role` here means an ACCESS role: "HR Admin", "Manager", "Employee".
-//     It answers "what is this person allowed to DO in the software?"
-//   - A person's JOB title ("Senior iOS Engineer") is `Employee.jobTitle`.
+// This is the access-control half of the system, kept entirely separate from
+// job titles. "HR Administrator", "Manager", "Employee" are AccessRoles.
+// "Software Engineer" is a Role.
 //
-// They are separate because they change independently: promoting an engineer
-// to Senior does not grant them access to salary data, and making someone an
-// HR Admin does not change their job.
+// The wiring is:
+//   Employee --(EmployeeAccessRole)--> AccessRole --(AccessRolePermission)--> Permission
 //
-// The wiring is: Employee --(EmployeeRole)--> Role --(RolePermission)--> Permission
 // Both links are many-to-many, and both use an explicit join table so we can
-// store extra facts on the link itself (scope, who granted it, when).
+// store extra facts on the link itself (scope, who granted it, when it lapses).
+//
+// PLANNED, NOT BUILT: a `Role.defaultAccessRoles` link, so that hiring someone
+// as a "Recruiter" (job title) automatically grants the "Recruiter" AccessRole.
+// It is a pure join table and can be added later with no data migration, so it
+// was left out of Phase 0.
 // =============================================================================
 
-model Role {
+model AccessRole {
   id String @id @default(cuid())
 
   /// Machine-readable key used in code, e.g. "hr_admin". Never renamed.
   key  String @unique
-  /// Human-readable label shown in the UI, e.g. "HR Administrator". Safe to reword.
+  /// Human-readable label shown in the UI, e.g. "HR Administrator".
   name String
 
   description String?
 
-  /// System roles are created by seeds/migrations and underpin the app's own
-  /// logic. The UI must prevent deleting or renaming them; customer-defined
-  /// roles added later are free-form.
+  /// System access roles are created by seeds/migrations and underpin the
+  /// app's own logic. The UI must prevent deleting or renaming them.
   isSystem Boolean @default(false) @map("is_system")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  permissions RolePermission[]
-  employees   EmployeeRole[]
+  permissions AccessRolePermission[]
+  employees   EmployeeAccessRole[]
 
-  @@map("roles")
+  @@map("access_roles")
 }
 
 model Permission {
@@ -328,7 +519,7 @@ model Permission {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  roles RolePermission[]
+  accessRoles AccessRolePermission[]
 
   /// Prevents the same resource+action being registered twice.
   @@unique([resource, action])
@@ -336,17 +527,17 @@ model Permission {
   @@map("permissions")
 }
 
-/// Join table linking Role to Permission.
+/// Join table linking AccessRole to Permission.
 ///
 /// This is an EXPLICIT join table (rather than Prisma's implicit many-to-many)
 /// specifically so it can carry `scope`. That single extra column is what lets
-/// "Manager" and "HR Admin" both hold `leave_request:approve` while meaning
-/// very different things — TEAM for the manager, GLOBAL for HR.
-model RolePermission {
+/// "Manager" and "HR Administrator" both hold `leave_request:approve` while
+/// meaning very different things — TEAM for the manager, GLOBAL for HR.
+model AccessRolePermission {
   id String @id @default(cuid())
 
-  roleId String @map("role_id")
-  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  accessRoleId String     @map("access_role_id")
+  accessRole   AccessRole @relation(fields: [accessRoleId], references: [id], onDelete: Cascade)
 
   permissionId String     @map("permission_id")
   permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
@@ -355,41 +546,41 @@ model RolePermission {
 
   createdAt DateTime @default(now()) @map("created_at")
 
-  /// A role holds a given permission once. Change the scope rather than adding
-  /// a second row.
-  @@unique([roleId, permissionId])
+  /// An access role holds a given permission once. Change the scope rather
+  /// than adding a second row.
+  @@unique([accessRoleId, permissionId])
   @@index([permissionId])
-  @@map("role_permissions")
+  @@map("access_role_permissions")
 }
 
-/// Join table linking Employee to Role.
+/// Join table linking Employee to AccessRole.
 ///
 /// Many-to-many because one person legitimately holds several access roles at
 /// once — a team lead who also does recruiting is "Manager" + "Recruiter".
-model EmployeeRole {
+model EmployeeAccessRole {
   id String @id @default(cuid())
 
   employeeId String   @map("employee_id")
-  employee   Employee @relation("EmployeeRoleAssignee", fields: [employeeId], references: [id], onDelete: Cascade)
+  employee   Employee @relation("AccessRoleAssignee", fields: [employeeId], references: [id], onDelete: Cascade)
 
-  roleId String @map("role_id")
-  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  accessRoleId String     @map("access_role_id")
+  accessRole   AccessRole @relation(fields: [accessRoleId], references: [id], onDelete: Cascade)
 
-  /// Who granted this role. "Who gave this person access to payroll?" is one of
-  /// the first questions any audit asks.
-  assignedById String?   @map("assigned_by_id")
-  assignedBy   Employee? @relation("EmployeeRoleAssigner", fields: [assignedById], references: [id], onDelete: SetNull)
+  /// Who granted this access. "Who gave this person access to payroll?" is one
+  /// of the first questions any audit asks.
+  grantedById String?   @map("granted_by_id")
+  grantedBy   Employee? @relation("AccessRoleGrantor", fields: [grantedById], references: [id], onDelete: SetNull)
 
-  assignedAt DateTime @default(now()) @map("assigned_at")
+  grantedAt DateTime @default(now()) @map("granted_at")
 
   /// Optional expiry, for temporary elevation — e.g. someone covering HR during
-  /// a colleague's leave. Null means the role does not expire.
+  /// a colleague's leave. Null means the access does not expire.
   expiresAt DateTime? @map("expires_at")
 
-  @@unique([employeeId, roleId])
-  @@index([roleId])
+  @@unique([employeeId, accessRoleId])
+  @@index([accessRoleId])
   @@index([expiresAt])
-  @@map("employee_roles")
+  @@map("employee_access_roles")
 }
 
 // =============================================================================
@@ -427,14 +618,15 @@ model Document {
   /// Path/key in object storage. NOT a public URL — access is granted through
   /// short-lived signed URLs generated per request, so that permission checks
   /// cannot be bypassed by sharing a link.
-  storageKey       String  @unique @map("storage_key")
-  originalFilename String  @map("original_filename")
-  mimeType         String  @map("mime_type")
-  sizeBytes        Int     @map("size_bytes")
+  storageKey       String @unique @map("storage_key")
+  originalFilename String @map("original_filename")
+  mimeType         String @map("mime_type")
+  sizeBytes        Int    @map("size_bytes")
+
   /// SHA-256 of the contents. Detects duplicate uploads and proves a file has
   /// not been altered since upload — which is the point of storing a signed
   /// contract in the first place.
-  checksum         String?
+  checksum String?
 
   // --- Compliance -----------------------------------------------------------
   /// Marks documents only HR should see (medical notes, disciplinary records).
@@ -442,6 +634,7 @@ model Document {
   isConfidential Boolean @default(false) @map("is_confidential")
 
   issuedAt DateTime? @map("issued_at") @db.Date
+
   /// Expiry date, where the document has one — visas, work permits, and
   /// certifications all lapse. Indexed because "what expires in the next 60
   /// days?" becomes a scheduled notification and a compliance report.
