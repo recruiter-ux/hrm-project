@@ -7,7 +7,7 @@
 > **Keep it current.** When a decision changes, edit this file in the same
 > commit as the code change.
 
-**Last updated:** Phase 0 — initial scaffolding
+**Last updated:** Phase 1 — authentication, permissions, employee management
 **Company:** Hazel Mobile (AI and mobility apps studio)
 **Product:** [PROJECT_NAME] — internal HR platform
 **Directed by:** a non-developer product owner, module by module, across many
@@ -17,22 +17,38 @@ separate sessions. Favour clarity and explicit comments over cleverness.
 
 ## 1. Where the project stands
 
-### Built (Phase 0)
+### Built (Phase 0 — scaffolding)
 
 - npm workspaces monorepo — NestJS API + Next.js web app
-- PostgreSQL schema for Core HR via Prisma (9 tables), including effective-dated
+- PostgreSQL schema for Core HR via Prisma, including effective-dated
   employment history
 - Docker Compose for local Postgres + Redis
 - GitHub Actions CI (format, lint, build)
 - A health endpoint and a status page that prove the stack is wired together
 
+### Built (Phase 1 — auth, permissions, employees)
+
+- **Authentication.** JWT access + refresh tokens in httpOnly cookies, refresh
+  rotation, server-side revocation, account lockout. 11 tables now.
+- **Permission enforcement.** Both guards are global; the `PermissionScope`
+  system actually restricts what each person can see and do.
+- **Employee CRUD.** Directory, profile, create, edit — all scope-aware.
+- **Employment history enforcement.** Job changes can only happen through the
+  transactional service. The shortcut is rejected by the API.
+- **Document upload/download** with a storage abstraction and confidentiality
+  controls.
+- **Org chart** built from current reporting lines.
+
 ### Deliberately NOT built yet
 
 Do not add these without being asked — they are scheduled for later phases.
 
-- **Authentication and authorisation.** The RBAC *tables* exist; nothing
-  enforces them. There is no login, no session, no password, no JWT.
-- **Employee UI.** No CRUD screens, no forms, no tables.
+- **User account provisioning.** Creating an employee does NOT create a login.
+  There is no invite email, no self-service password reset, and no admin UI for
+  granting AccessRoles. Accounts currently come from the seed script only. This
+  is the most obvious gap — see §8.
+- **Department and Role (job title) admin screens.** Both are seeded; neither
+  can be edited in the UI.
 - **Every other module:** Recruitment/ATS, Attendance & Shifts, Leave,
   Dashboards, Notifications, Reporting, Payroll, Performance, AI features.
 - **Tests.** No test runner is installed. Add Jest with the first real feature.
@@ -72,14 +88,27 @@ Later: Payroll, Performance Management, AI features.
 │   │   │   ├── seed.ts         Development sample data (safe to re-run)
 │   │   │   └── migrations/     Generated SQL. Committed. Never edit by hand.
 │   │   └── src/
-│   │       ├── main.ts         Entry point: CORS, validation, /api prefix
+│   │       ├── main.ts         Entry point: cookies, CORS, validation, /api prefix
 │   │       ├── app.module.ts   Root module — register new modules HERE
 │   │       ├── config/         Env parsing + start-up validation
 │   │       ├── prisma/         PrismaService (global)
 │   │       ├── redis/          RedisService (global, unused so far)
+│   │       ├── storage/        StorageService — swap for S3 later (global)
+│   │       ├── auth/           Login, tokens, JwtAuthGuard
+│   │       ├── permissions/    Scope resolution + PermissionsGuard (global)
+│   │       ├── assignments/    EmploymentAssignmentService — job changes
+│   │       ├── employees/      Employee CRUD + org chart
+│   │       ├── documents/      Upload / download / archive
 │   │       └── health/         GET /health
 │   └── web/                    Next.js frontend
-│       └── src/app/            App Router pages
+│       └── src/
+│           ├── app/
+│           │   ├── login/      Sign-in screen
+│           │   └── (app)/      Authenticated pages (shared nav shell)
+│           │       ├── employees/
+│           │       └── org-chart/
+│           ├── components/     AuthProvider, shared UI
+│           └── lib/            api.ts (fetch + auto-refresh), types.ts
 ├── packages/                   Empty. For shared code later.
 ├── .github/workflows/ci.yml
 ├── docker-compose.yml          Postgres + Redis only
@@ -335,22 +364,27 @@ Phase 0. Until then, access is granted explicitly per person.
 
 Read this section before designing any new module.
 
-### The employment-history invariant is not enforced by code yet (the big one)
+### ✅ Resolved in Phase 1
 
-`EmploymentAssignment` exists and the schema is right, but **nothing yet stops
-it going wrong.** Two specific gaps:
+- **The employment-history invariant is now enforced** — DTO shape, transactional
+  service, and partial unique index. See §8.
+- **`User` is a separate table from `Employee`**, linked by an optional
+  `employeeId`, exactly as planned.
 
-1. **The partial unique index must be added by hand** to the first generated
-   migration — SQL is in `schema.prisma` above the model, and repeated in §4.
-   Until it exists, an employee can end up with two "current" assignments.
-2. **The transactional service method does not exist.** The seed writes the
-   `Employee` cache and the assignment rows in separate steps, which is fine for
-   fixed sample data but is *not* the pattern for real code.
+### No user-account provisioning (the biggest current gap)
 
-**Build `EmploymentAssignmentService.changeAssignment()` as the first piece of
-Core HR business logic**, before any screen can edit an employee. It must, in
-one transaction: close the open assignment, insert the new one, and update the
-five cached fields on `Employee`.
+Creating an employee does **not** create a login. There is no invite flow, no
+self-service password reset, and no UI for granting AccessRoles — accounts and
+role grants exist only because the seed script writes them.
+
+So a real new hire added through the UI today cannot sign in. This is the first
+thing to build in Phase 2. It needs, roughly:
+
+- an admin screen to create a `User` for an employee and grant AccessRoles
+- an invite or set-password flow (emailed one-time token) so nobody has to
+  handle a plaintext password
+- password reset, and "revoke all sessions" (already implemented as
+  `TokenService.revokeAllForUser`, just not exposed)
 
 ### No status history
 
@@ -360,35 +394,33 @@ drown the career history in noise. If "how long was this person on leave last
 year?" becomes a real question, derive it from the Leave module rather than
 adding status rows to `EmploymentAssignment`.
 
-### Employee is not the login entity
-
-When Auth is built, add a separate `User` table with an optional `employeeId`
-rather than putting passwords on `Employee`. They are genuinely different
-things: not every employee logs in (contractors, floor staff), and not every
-user is an employee (external recruiters, auditors, ATS candidates).
-
-### Employee is not the login entity
-
-When Auth is built, add a separate `User` table with an optional `employeeId`
-rather than putting passwords on `Employee`. They are genuinely different
-things: not every employee logs in (contractors, floor staff), and not every
-user is an employee (external recruiters, auditors, ATS candidates).
-
 ### No audit log
 
-Who changed a salary, and when? Add a generic `AuditLog` table
-(`actorId`, `entityType`, `entityId`, `action`, `before`, `after`, `at`) during
-the Auth phase, when there is finally an actor to record.
+`EmploymentAssignment.recordedById` and `EmployeeAccessRole.grantedById` cover
+the two most sensitive changes, but there is still no general log of who edited
+what. Add a generic `AuditLog` table (`actorId`, `entityType`, `entityId`,
+`action`, `before`, `after`, `at`) — now feasible, since there is finally an
+authenticated actor to record.
 
 ### Open security items
 
 - `Employee.dateOfBirth` and `nationalId` are regulated personal data stored in
   plain columns. Decide on pgcrypto or application-level encryption **before**
   real records are loaded.
-- No rate limiting, no helmet/security headers, no request logging. All belong
-  with the Auth phase.
-- The seed's sample data uses realistic-looking names and emails. Never point
-  the seed at a production database.
+- **No rate limiting on the login endpoint.** Per-account lockout exists (5
+  attempts, 15 minutes) but an attacker can still spray many accounts from one
+  IP. Add `@nestjs/throttler`.
+- **No security headers.** Add `helmet`.
+- **No structured request logging.** Nest's default logger is fine locally but
+  will not do once this is deployed.
+- **Uploaded files are not virus-scanned**, and the MIME type is taken from the
+  client rather than sniffed from the bytes. Both matter once real staff can
+  upload.
+- **`sameSite: 'lax'` assumes API and web share a site.** Revisit before
+  deploying them to different domains — see §8.
+- The seed's sample data uses realistic-looking names and a known password.
+  It refuses to run with `NODE_ENV=production`, but never point it at a real
+  database regardless.
 
 ### Single-tenant by design
 
@@ -447,7 +479,149 @@ rename once they hold live values.
 
 ---
 
-## 8. Session start checklist
+## 8. Authentication and permissions (Phase 1)
+
+### How signing in works
+
+1. `POST /api/auth/login` checks the password with bcrypt.
+2. The API returns **two httpOnly cookies** — a short-lived access token
+   (15 min) and a long-lived refresh token (7 days).
+3. Every later request carries the access cookie automatically.
+4. When it expires, the web app calls `POST /api/auth/refresh` once, gets a new
+   pair, and retries. The user notices nothing.
+5. `POST /api/auth/logout` revokes the refresh token server-side and clears
+   both cookies.
+
+### Decisions worth knowing
+
+- **Tokens live in httpOnly cookies, not localStorage.** JavaScript cannot read
+  an httpOnly cookie, so a cross-site-scripting bug in the frontend cannot
+  steal a session. The cost is that the frontend can never inspect the token —
+  which is why `GET /api/auth/me` exists and why session restore on page
+  refresh is a network call rather than a localStorage read.
+- **Two different secrets** for access and refresh tokens. If the access
+  secret leaks, the attacker can mint short-lived tokens but cannot mint
+  refresh tokens and hold a session indefinitely. Start-up validation refuses
+  to boot if they are equal or shorter than 32 characters.
+- **Refresh tokens are stored server-side, hashed (SHA-256).** A plain JWT
+  cannot be revoked; a database row can. This is what makes logout real. SHA-256
+  rather than bcrypt because the token is already server-generated randomness —
+  there is nothing to brute-force, and the lookup happens on every refresh.
+- **Refresh tokens rotate.** Each refresh revokes the old token, so a stolen one
+  is usable at most once.
+- **`sameSite: 'lax'` works in development** because `localhost:3000` and
+  `localhost:4000` count as the same site (ports are ignored). ⚠️ **If the API
+  and web app are ever deployed to different domains, this must become
+  `sameSite: 'none'` with `secure: true`,** or every login will silently fail.
+  See `TokenService.setAuthCookies`.
+- **bcryptjs, not bcrypt or argon2.** The pure-JavaScript implementation avoids
+  native compilation, which is a recurring source of install failures on
+  Windows. Same algorithm, somewhat slower. Work factor 12.
+- **Account lockout** after 5 failed attempts, for 15 minutes. Login failures
+  all return the same message so nobody can enumerate which emails have
+  accounts, and a missing account still runs a dummy hash so response timing
+  does not give it away either.
+
+### How permissions are enforced
+
+Two guards, both registered globally in `AppModule`, so **every endpoint is
+protected by default**:
+
+| Guard | Question | Opt out with |
+| --- | --- | --- |
+| `JwtAuthGuard` | Who are you? | `@Public()` |
+| `PermissionsGuard` | May you do this? | (only acts on `@RequirePermission(...)`) |
+
+Forgetting a decorator therefore *locks an endpoint down* rather than exposing
+it — the safe direction to fail.
+
+**Permissions are loaded fresh from the database on each request, not baked
+into the token.** That costs one indexed query and buys immediate revocation:
+remove someone from the `hr_admin` AccessRole and they lose access on their
+next request, not 15 minutes later.
+
+**The guard decides *whether*; the service decides *which rows*.**
+`PermissionsGuard` resolves the caller's scope and attaches it to the request;
+`PermissionsService.buildEmployeeScopeFilter()` turns that scope into a Prisma
+`where` fragment, which is ANDed with the user's own filters. There is no way
+to widen visibility through a crafted query string.
+
+Verified behaviour with the seed data:
+
+| Account | AccessRole | Scope | Sees |
+| --- | --- | --- | --- |
+| sana.iqbal | hr_admin | GLOBAL | all 7 |
+| bilal.khan | department_head | DEPARTMENT | 4 (Engineering + nested teams) |
+| omar.farooq | manager | TEAM | 2 (self + direct reports) |
+| zara.ahmed | employee | SELF | 1 (self) |
+
+**TEAM is one level deep by design** — a manager sees their own reports, not
+their reports' reports. Skip-level visibility is what DEPARTMENT is for. If
+that is wrong for Hazel Mobile, `buildEmployeeScopeFilter` is the single place
+to change it.
+
+**Single-record endpoints return 404, not 403, when out of scope.** Otherwise a
+manager could discover that an employee exists by probing ids.
+
+### The employment-history invariant is now enforced in code
+
+The gap flagged in Phase 0 is closed. Three layers now protect it:
+
+1. **The DTO shape.** `roleId`, `departmentId`, `managerId`, `employmentType`
+   and `workLocationType` are only reachable inside `UpdateEmployeeDto.assignment`,
+   which cannot be submitted without `effectiveFrom` and `reason`. Because the
+   global ValidationPipe runs with `forbidNonWhitelisted: true`, sending any of
+   them at the top level is **rejected with a 400** rather than silently applied.
+2. **The service.** `EmploymentAssignmentService.changeAssignment()` closes the
+   open assignment, opens the new one, and refreshes the cached fields on
+   `Employee` — all in one transaction. Nothing else writes those five fields.
+3. **The database.** The partial unique index makes a second open assignment
+   impossible even if the code were wrong.
+
+`GET /api/employees/drift` (requires `access_role:manage`) lists any employee
+whose cache has drifted from their open assignment. It should always be empty.
+
+### Documents
+
+- Files are written to local disk in development via `StorageService`. Only a
+  `storageKey` is stored in the database — swap in an S3 implementation and
+  nothing else changes.
+- **Storage keys are generated from a UUID, never the uploaded filename.** A
+  filename like `../../.env` would otherwise escape the storage directory.
+- **Allowlist of MIME types**, not a blocklist.
+- Downloads are always `Content-Disposition: attachment` with `nosniff`, so an
+  uploaded HTML or SVG file cannot execute scripts on our origin.
+- **Two checks per document:** the employee must be within your scope, AND
+  confidential documents additionally require `document:read_confidential`.
+  Confidential files are filtered out of listings entirely rather than shown
+  locked — their existence alone can be sensitive.
+
+### Org chart: why it reads the cached fields
+
+The chart shows the org as it stands **today**, which is exactly what
+`Employee.managerId` represents. Deriving it from `employment_assignments`
+would mean filtering `effective_to IS NULL` and joining to reach the same
+answer more slowly.
+
+That is only safe because the cache is now trustworthy — see the three layers
+above. A **historical** org chart ("show me the org last March") is a different
+feature and *would* have to query assignments with a date filter. Worth
+building when Reporting lands.
+
+### A bug worth remembering
+
+`enableImplicitConversion: true` on the global ValidationPipe coerces strings
+to booleans with `Boolean(value)` — and **`Boolean('false')` is `true`**. This
+silently marked every uploaded document confidential until it was caught.
+
+The fix is in `UploadDocumentDto`: read the raw value off `obj` inside
+`@Transform` rather than trusting the already-converted `value`. **Any future
+boolean that arrives as a string (query param or form field) needs the same
+treatment.**
+
+---
+
+## 9. Session start checklist
 
 When starting a new session on this project:
 

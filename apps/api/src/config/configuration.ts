@@ -27,4 +27,16 @@ export default () => ({
   redis: {
     url: process.env.REDIS_URL ?? 'redis://localhost:6379',
   },
+
+  auth: {
+    accessSecret: process.env.JWT_ACCESS_SECRET ?? '',
+    refreshSecret: process.env.JWT_REFRESH_SECRET ?? '',
+    accessTtl: process.env.JWT_ACCESS_TTL ?? '15m',
+    refreshTtl: process.env.JWT_REFRESH_TTL ?? '7d',
+  },
+
+  storage: {
+    uploadDir: process.env.UPLOAD_DIR ?? './uploads',
+    maxUploadBytes: parseInt(process.env.MAX_UPLOAD_BYTES ?? '10485760', 10),
+  },
 });

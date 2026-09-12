@@ -4,6 +4,7 @@ import 'reflect-metadata';
 import { Logger, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
+import cookieParser from 'cookie-parser';
 
 import { AppModule } from './app.module';
 
@@ -22,6 +23,13 @@ async function bootstrap(): Promise<void> {
   // root. Load balancers and uptime monitors conventionally probe /health.
   app.setGlobalPrefix('api', { exclude: ['health'] });
 
+  // Auth tokens travel as httpOnly cookies, so they must be parsed before any
+  // guard tries to read them.
+  app.use(cookieParser());
+
+  // `credentials: true` is what allows the browser to send those cookies
+  // cross-origin (web on :3000, API on :4000). Without it the browser silently
+  // drops them and every request looks unauthenticated.
   app.enableCors({
     origin: corsOrigins,
     credentials: true,

@@ -2,9 +2,9 @@
 
 Internal HR platform for **Hazel Mobile**.
 
-**Status: Phase 0 — scaffolding only.** The foundations are in place: a backend,
-a frontend, a database schema for Core HR, and automated checks. There are no
-HR features and no login yet. Those come in later phases.
+**Status: Phase 1 — login, permissions, and employee management.** You can sign
+in, browse and edit employees, upload documents, and view the org chart. What
+each person can see depends on their access level.
 
 For *why* things were built this way, see **[PROJECT_NOTES.md](PROJECT_NOTES.md)**.
 
@@ -100,23 +100,28 @@ from both appear in the same window, colour-coded `api` and `web`.
 
 ## Step 4 — Confirm it is working
 
-Open <http://localhost:3000> in your browser.
+Open <http://localhost:3000> in your browser. You should see a sign-in screen.
 
-You should see the **[PROJECT_NAME]** status page with four indicators. All four
-should be **green**:
+Sign in with any of these. **The password for all of them is `Password123!`**
 
-- Web (Next.js)
-- API (NestJS)
-- Database (Postgres)
-- Cache (Redis)
+| Email | What they can see |
+| --- | --- |
+| `sana.iqbal@hazelmobile.com` | HR administrator — everyone |
+| `bilal.khan@hazelmobile.com` | Department head — Engineering and its sub-teams |
+| `omar.farooq@hazelmobile.com` | Manager — himself and his direct reports |
+| `zara.ahmed@hazelmobile.com` | Employee — only herself |
 
-If all four are green, everything is working correctly. That is the whole
-confirmation — you do not need to read any code.
+Signing in as two different people and comparing what they see is the quickest
+way to confirm permissions are working.
+
+These accounts exist only because the seed script creates them. Adding an
+employee through the UI does **not** create a login — that comes in Phase 2.
 
 ### Two extra checks (optional)
 
 **See the raw API response** — open <http://localhost:4000/health>. You should
-get a block of text starting with `{"status":"ok"`.
+get a block of text starting with `{"status":"ok"`. This is the only endpoint
+that works without signing in; everything else returns "Unauthorized" by design.
 
 **See the sample data in the database** — in a *second* terminal window:
 

@@ -24,8 +24,17 @@ import {
   PrismaClient,
   WorkLocationType,
 } from '@prisma/client';
+import { hash } from 'bcryptjs';
 
 const prisma = new PrismaClient();
+
+/**
+ * Password given to every seeded account.
+ *
+ * DEVELOPMENT ONLY. This seed must never run against a real database — see
+ * the guard in main() below, which refuses to run when NODE_ENV=production.
+ */
+const SEED_PASSWORD = 'Password123!';
 
 // -----------------------------------------------------------------------------
 // 1. PERMISSIONS
@@ -532,6 +541,12 @@ const EMPLOYEES: Array<{
 ];
 
 async function main(): Promise<void> {
+  // Hard stop. This seed writes known passwords and would be catastrophic
+  // against real employee data.
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error('The seed script must never run with NODE_ENV=production.');
+  }
+
   console.log('Seeding [PROJECT_NAME] development data...\n');
 
   // --- Permissions -----------------------------------------------------------
@@ -739,9 +754,36 @@ async function main(): Promise<void> {
     });
   }
 
+  // --- Login accounts --------------------------------------------------------
+  // Everyone in EMPLOYEES gets an account with the same development password,
+  // so you can sign in as each AccessRole and see permission scoping in action.
+  const passwordHash = await hash(SEED_PASSWORD, 12);
+
+  for (const emp of EMPLOYEES) {
+    const employee = await prisma.employee.findUniqueOrThrow({
+      where: { employeeNumber: emp.employeeNumber },
+    });
+
+    await prisma.user.upsert({
+      where: { email: emp.workEmail },
+      // Password is reset on every seed run so a forgotten local password is
+      // never a problem. Safe precisely because this is development-only data.
+      update: { passwordHash, employeeId: employee.id, isActive: true },
+      create: { email: emp.workEmail, passwordHash, employeeId: employee.id },
+    });
+  }
+  console.log(`  Login users  : ${EMPLOYEES.length}`);
+
   console.log('\nSeed complete.');
   console.log('Inspect the data visually with:  npm run prisma:studio');
-  console.log('Try the "employment_assignments" table to see career history.');
+  console.log('Try the "employment_assignments" table to see career history.\n');
+
+  console.log('Sign in at http://localhost:3000 with any of these:');
+  console.log(`  (password for all: ${SEED_PASSWORD})\n`);
+  const widest = Math.max(...EMPLOYEES.map((e) => e.workEmail.length));
+  for (const emp of EMPLOYEES) {
+    console.log(`  ${emp.workEmail.padEnd(widest)}  ${emp.accessRoles.join(', ')}`);
+  }
 }
 
 main()

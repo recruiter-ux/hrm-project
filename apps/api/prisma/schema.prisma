@@ -240,6 +240,9 @@ model Employee {
   accessRoles         EmployeeAccessRole[]   @relation("AccessRoleAssignee")
   accessRolesGranted  EmployeeAccessRole[]   @relation("AccessRoleGrantor")
   departmentsHeaded   Department[]           @relation("DepartmentHead")
+  /// The login account for this person, if they have one. Optional in both
+  /// directions — see the User model for why.
+  user                User?                  @relation("UserEmployee")
 
   // --- Indexes --------------------------------------------------------------
   // An index makes filtering on a column fast. These cover the queries the
@@ -661,4 +664,89 @@ model Document {
   @@index([expiresAt])
   @@index([deletedAt])
   @@map("documents")
+}
+
+// =============================================================================
+// AUTHENTICATION (added in Phase 1)
+//
+// WHY `User` IS SEPARATE FROM `Employee`
+// It is tempting to put a password column on Employee and be done. That breaks
+// down quickly, because the two are genuinely different things:
+//
+//   - Not every employee logs in. Contractors, floor staff, and people who
+//     have left all need employee records but no account.
+//   - Not every user is an employee. External recruiters, auditors, and
+//     (once the ATS lands) job candidates all need accounts but are not staff.
+//   - Accounts get disabled, locked, and deleted on a different schedule from
+//     employment records, which are retained for years for tax and audit.
+//
+// So: one optional link, `User.employeeId`, and either side can exist alone.
+// =============================================================================
+
+model User {
+  id String @id @default(cuid())
+
+  /// Login identifier. Kept separate from `Employee.workEmail` even though
+  /// they will usually match — an account's login should not silently change
+  /// because HR corrected a typo in someone's work email.
+  email String @unique
+
+  /// bcrypt hash. The plaintext password is never stored or logged.
+  passwordHash String @map("password_hash")
+
+  /// The person this account belongs to. Nullable both ways (see above).
+  /// `@unique` because one employee gets at most one login account.
+  employeeId String?   @unique @map("employee_id")
+  employee   Employee? @relation("UserEmployee", fields: [employeeId], references: [id], onDelete: SetNull)
+
+  /// Disable an account without deleting it — the standard offboarding step.
+  /// Checked on every token refresh, so revoking access takes effect within
+  /// one access-token lifetime rather than needing a password reset.
+  isActive Boolean @default(true) @map("is_active")
+
+  lastLoginAt DateTime? @map("last_login_at")
+
+  /// Brute-force protection. Cleared on a successful login.
+  failedLoginAttempts Int       @default(0) @map("failed_login_attempts")
+  lockedUntil         DateTime? @map("locked_until")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  refreshTokens RefreshToken[]
+
+  @@index([isActive])
+  @@map("users")
+}
+
+/// One row per issued refresh token.
+///
+/// Refresh tokens are stored SERVER-SIDE (hashed) rather than being trusted
+/// purely on their signature. That is what makes logout real: a stateless JWT
+/// cannot be revoked, but deleting the row here immediately kills the session.
+/// It also lets an admin see and end active sessions later.
+model RefreshToken {
+  id String @id @default(cuid())
+
+  userId String @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// SHA-256 of the token, never the token itself. If this table leaks, the
+  /// hashes cannot be replayed as sessions.
+  tokenHash String @unique @map("token_hash")
+
+  expiresAt DateTime  @map("expires_at")
+  /// Set on logout or on reuse-detection. Kept rather than deleted so the
+  /// audit trail survives.
+  revokedAt DateTime? @map("revoked_at")
+
+  /// Rough session context, for a future "your active sessions" screen.
+  userAgent String? @map("user_agent")
+  ipAddress String? @map("ip_address")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
 }
