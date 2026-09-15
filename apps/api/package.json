@@ -1,8 +1,8 @@
 {
-  "name": "@project-name/api",
+  "name": "@velixa-hr/api",
   "version": "0.1.0",
   "private": true,
-  "description": "[PROJECT_NAME] backend API (NestJS)",
+  "description": "Velixa HR backend API (NestJS)",
   "main": "dist/main.js",
   "scripts": {
     "dev": "nest start --watch",

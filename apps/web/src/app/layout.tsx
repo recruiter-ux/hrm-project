@@ -5,7 +5,7 @@ import { AuthProvider } from '@/components/auth-provider';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: '[PROJECT_NAME]',
+  title: 'Velixa HR',
   description: 'Internal HR platform for Hazel Mobile',
 };
 

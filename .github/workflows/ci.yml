@@ -1,5 +1,5 @@
 # =============================================================================
-# [PROJECT_NAME] — Continuous Integration
+# Velixa HR — Continuous Integration
 #
 # Runs automatically on GitHub every time you push or open a pull request.
 # It does NOT deploy anything. It only answers one question:

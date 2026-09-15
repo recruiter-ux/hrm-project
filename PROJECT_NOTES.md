@@ -1,4 +1,4 @@
-# [PROJECT_NAME] — Project Notes
+# Velixa HR — Project Notes
 
 > **Purpose of this file:** a complete context handoff. Paste it at the start of
 > any new session so whoever (or whatever) picks up the work knows what was
@@ -9,7 +9,7 @@
 
 **Last updated:** Phase 1 — authentication, permissions, employee management
 **Company:** Hazel Mobile (AI and mobility apps studio)
-**Product:** [PROJECT_NAME] — internal HR platform
+**Product:** Velixa HR — internal HR platform
 **Directed by:** a non-developer product owner, module by module, across many
 separate sessions. Favour clarity and explicit comments over cleverness.
 
@@ -80,7 +80,7 @@ Later: Payroll, Performance Management, AI features.
 ## 3. Folder structure
 
 ```
-[PROJECT_NAME]/
+Velixa HR/
 ├── apps/
 │   ├── api/                    NestJS backend
 │   │   ├── prisma/
@@ -437,45 +437,64 @@ rather than paying the complexity cost now for a maybe.
 
 ---
 
-## 7. ⚠️ `[PROJECT_NAME]` placeholder — read before renaming
+## 7. The product name
 
-There are **two** placeholder tokens, because `[PROJECT_NAME]` is not a legal
-identifier in several of the places a name is needed.
+The project was built under a `[PROJECT_NAME]` placeholder and renamed to
+**Velixa HR** on 2026-09-15. The placeholder is gone; this section records what
+the name touches, so a future rename (or a second environment) does not have to
+rediscover it.
 
-| Token | Used for | Why |
+### The name appears in three different forms
+
+Because "Velixa HR" is not a legal identifier everywhere a name is needed:
+
+| Form | Where | Constraint |
 | --- | --- | --- |
-| `[PROJECT_NAME]` | Prose, UI text, page titles, comments | Human-readable |
-| `project-name` | npm package names, Docker names | npm forbids uppercase and `[` `]` |
-| `project_name` | Postgres database name | Postgres identifier rules |
+| `Velixa HR` | Prose, UI text, page titles, code comments | Human-readable |
+| `velixa-hr` | npm package name and scope, Docker project/container/volume names | Lowercase, no spaces |
+| `velixa_hr` | Postgres database name (`velixa_hr_dev`) | Postgres identifier rules |
 
-**Search for all three.** From the repo root:
+To find every occurrence:
 
 ```bash
-git grep -n -e "PROJECT_NAME" -e "project-name" -e "project_name"
+git grep -n -e "Velixa HR" -e "velixa-hr" -e "velixa_hr"
 ```
 
-### Places that are awkward to change — check these specifically
+### What each form controls
 
-| Location | Value | Why it is awkward |
+| Location | Value | Notes |
 | --- | --- | --- |
-| `.env` / `.env.example` | `POSTGRES_DB=project_name_dev` | Renaming needs the database recreated. Do `npm run db:nuke`, rename, then `npm run db:up && npm run prisma:migrate && npm run db:seed`. **All local data is lost** — fine now, not later. |
-| `.env` / `.env.example` | `DATABASE_URL` | Contains the database name again. Must match `POSTGRES_DB` or nothing connects. |
-| `docker-compose.yml` | `name:`, `container_name`, volume `name:` | Renaming a volume **orphans the old one** — Docker creates a fresh empty volume and the old data is invisible (though still on disk taking space). Run `npm run db:nuke` *before* renaming. |
-| `package.json` (all three) | `@project-name/api`, `@project-name/web` | The npm **scope**. Referenced in root scripts (`-w @project-name/api`). Rename all of them together or `npm run dev` breaks. |
-| Root `package.json` | `"name": "project-name"` | Must stay lowercase, no spaces, no brackets. |
-| Repo folder | `D:\WORK\HRM` | Currently `HRM`, not the placeholder. Rename before `git init` if you want it to match — otherwise harmless. |
-| Git remote URL | set at push time | Renaming the GitHub repo later requires `git remote set-url`. |
+| Root `package.json` | `"name": "velixa-hr"` | Must stay lowercase, no spaces |
+| All three `package.json` | `@velixa-hr/api`, `@velixa-hr/web` | The npm **scope**. Root scripts reference it (`-w @velixa-hr/api`) — these must change together or `npm run dev` breaks. Re-run `npm install` afterwards so the workspace symlinks and lockfile are rebuilt. |
+| `.env` / `.env.example` | `POSTGRES_DB=velixa_hr_dev` | Changing it requires recreating the database |
+| `.env` / `.env.example` | `DATABASE_URL` | Repeats the database name — must match `POSTGRES_DB` or nothing connects |
+| `docker-compose.yml` | `name:`, `container_name:`, volume `name:` | Renaming a volume **orphans the old one**: Docker silently creates a fresh empty volume and the old data becomes invisible while still consuming disk. Always `npm run db:nuke` *before* changing volume names. |
 
-### Safe to change any time
+### If the name ever changes again
 
-Page titles, `<title>` metadata, README/PROJECT_NOTES prose, code comments, the
-CI workflow name, the health endpoint's `service` string.
+Do it in this order. Steps 1 and 5 are the ones people forget.
+
+1. `npm run db:nuke` — removes containers **and** volumes while Compose still
+   knows their current names. Skipping this leaves orphaned volumes.
+2. Find-and-replace all three forms across tracked files **and `.env`**
+   (`.env` is git-ignored, so `git grep` will not show it).
+3. `npm install` — rebuilds workspace links and `package-lock.json`.
+4. `npm run db:up && npm run prisma:migrate && npm run db:seed` — the new
+   database starts empty, so migrations and seed must be re-run.
+5. Restart the dev servers. They cache the old workspace names.
 
 ### Not yet present, but will need the name
 
-JWT issuer/audience (Auth phase), Redis key prefix, email "from" name, S3
-bucket name. **Decide the name before those land** — they are much harder to
-rename once they hold live values.
+JWT issuer/audience claims, Redis key prefix, email "from" name, S3 bucket
+name. None exist yet. Once they hold live values they are much harder to
+rename, so wire them to the current name deliberately when they land.
+
+### Unaffected by the rename
+
+The **repo folder** is still `D:\WORK\HRM` and the **GitHub remote** is still
+`recruiter-ux/hrm-project`. Neither matters functionally. If you want them to
+match the product name, rename the GitHub repo in its settings and then
+`git remote set-url origin <new-url>`; the local folder can be renamed freely.
 
 ---
 

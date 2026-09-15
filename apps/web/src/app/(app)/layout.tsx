@@ -54,7 +54,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
       <header className="border-b border-[var(--border)]">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-4 px-6 py-3">
           <Link href="/employees" className="font-semibold">
-            [PROJECT_NAME]
+            Velixa HR
           </Link>
 
           <nav className="flex gap-1">

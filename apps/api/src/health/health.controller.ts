@@ -48,7 +48,7 @@ export class HealthController {
 
     return {
       status: database.status === 'up' ? 'ok' : 'degraded',
-      service: '[PROJECT_NAME] API',
+      service: 'Velixa HR API',
       timestamp: new Date().toISOString(),
       uptimeSeconds: Math.round(process.uptime()),
       dependencies: { database, redis },

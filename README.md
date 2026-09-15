@@ -1,4 +1,4 @@
-# [PROJECT_NAME]
+# Velixa HR
 
 Internal HR platform for **Hazel Mobile**.
 
@@ -272,10 +272,19 @@ git push
 
 ## A note on the project name
 
-`[PROJECT_NAME]` is a placeholder. When you settle on the real name, see
-**[PROJECT_NOTES.md § 7](PROJECT_NOTES.md#7-️-project_name-placeholder--read-before-renaming)** —
-it lists every place the name appears and flags the few that are awkward to
-change once there is real data.
+The name appears in three forms, because "Velixa HR" is not a legal identifier
+everywhere a name is needed:
 
-Short version: there are **three** tokens to replace, not one —
-`[PROJECT_NAME]`, `project-name`, and `project_name`.
+| Form | Used for |
+| --- | --- |
+| `Velixa HR` | Prose, page titles, UI text |
+| `velixa-hr` | npm package name and scope, Docker container and volume names |
+| `velixa_hr` | The Postgres database, `velixa_hr_dev` |
+
+You will not normally touch these. If the name ever changes again,
+**[PROJECT_NOTES.md § 7](PROJECT_NOTES.md#7-the-product-name)** has the ordered
+checklist — the two steps people forget are clearing the Docker volumes
+*before* renaming them, and re-running `npm install` afterwards.
+
+The repo folder (`HRM`) and the GitHub repo (`hrm-project`) still use the old
+working name. Neither affects anything; rename them whenever you like.

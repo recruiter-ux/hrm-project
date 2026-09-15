@@ -1,5 +1,5 @@
 # =============================================================================
-# [PROJECT_NAME] — local development infrastructure
+# Velixa HR — local development infrastructure
 #
 # This file runs ONLY the databases, not the application. You run the API and
 # web app on your machine with `npm run dev` so that code changes reload
@@ -13,17 +13,17 @@
 # script can safely assume the database is accepting connections.
 # =============================================================================
 
-name: project-name
+name: velixa-hr
 
 services:
   postgres:
     image: postgres:17-alpine
-    container_name: project-name-postgres
+    container_name: velixa-hr-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-app}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-localdevpassword}
-      POSTGRES_DB: ${POSTGRES_DB:-project_name_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-velixa_hr_dev}
       # Makes text sorting/comparison deterministic across machines.
       POSTGRES_INITDB_ARGS: '--encoding=UTF8 --locale=C'
     ports:
@@ -34,7 +34,7 @@ services:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
       test:
-        ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-project_name_dev}']
+        ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-velixa_hr_dev}']
       interval: 5s
       timeout: 5s
       retries: 10
@@ -42,7 +42,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: project-name-redis
+    container_name: velixa-hr-redis
     restart: unless-stopped
     # appendonly makes Redis persist to disk. Not strictly needed for a cache,
     # but the notification/job queue in a later phase will want durability.
@@ -60,6 +60,6 @@ services:
 
 volumes:
   postgres-data:
-    name: project-name-postgres-data
+    name: velixa-hr-postgres-data
   redis-data:
-    name: project-name-redis-data
+    name: velixa-hr-redis-data

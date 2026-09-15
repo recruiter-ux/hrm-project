@@ -52,7 +52,7 @@ export default function LoginPage() {
           <p className="text-sm font-medium tracking-wide text-[var(--muted)] uppercase">
             Hazel Mobile
           </p>
-          <h1 className="mt-1 text-2xl font-semibold">[PROJECT_NAME]</h1>
+          <h1 className="mt-1 text-2xl font-semibold">Velixa HR</h1>
           <p className="mt-2 text-sm text-[var(--muted)]">Sign in to continue.</p>
         </header>
 

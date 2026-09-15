@@ -1,8 +1,8 @@
 {
-  "name": "project-name",
+  "name": "velixa-hr",
   "version": "0.1.0",
   "private": true,
-  "description": "[PROJECT_NAME] — internal HR platform for Hazel Mobile",
+  "description": "Velixa HR — internal HR platform for Hazel Mobile",
   "workspaces": [
     "apps/*",
     "packages/*"
@@ -13,11 +13,11 @@
   },
   "scripts": {
     "setup": "npm install && npm run db:up && npm run prisma:generate && npm run prisma:migrate && npm run db:seed",
-    "dev": "concurrently -n api,web -c blue,magenta \"npm run dev -w @project-name/api\" \"npm run dev -w @project-name/web\"",
-    "dev:api": "npm run dev -w @project-name/api",
-    "dev:web": "npm run dev -w @project-name/web",
-    "build": "npm run build -w @project-name/api && npm run build -w @project-name/web",
-    "lint": "npm run lint -w @project-name/api && npm run lint -w @project-name/web",
+    "dev": "concurrently -n api,web -c blue,magenta \"npm run dev -w @velixa-hr/api\" \"npm run dev -w @velixa-hr/web\"",
+    "dev:api": "npm run dev -w @velixa-hr/api",
+    "dev:web": "npm run dev -w @velixa-hr/web",
+    "build": "npm run build -w @velixa-hr/api && npm run build -w @velixa-hr/web",
+    "lint": "npm run lint -w @velixa-hr/api && npm run lint -w @velixa-hr/web",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "format": "prettier --write \"**/*.{ts,tsx,js,mjs,json,md,yml,yaml}\"",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,mjs,json,md,yml,yaml}\"",
@@ -25,10 +25,10 @@
     "db:down": "docker compose down",
     "db:logs": "docker compose logs -f",
     "db:nuke": "docker compose down -v",
-    "prisma:generate": "npm run prisma:generate -w @project-name/api",
-    "prisma:migrate": "npm run prisma:migrate -w @project-name/api",
-    "prisma:studio": "npm run prisma:studio -w @project-name/api",
-    "db:seed": "npm run db:seed -w @project-name/api"
+    "prisma:generate": "npm run prisma:generate -w @velixa-hr/api",
+    "prisma:migrate": "npm run prisma:migrate -w @velixa-hr/api",
+    "prisma:studio": "npm run prisma:studio -w @velixa-hr/api",
+    "db:seed": "npm run db:seed -w @velixa-hr/api"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",

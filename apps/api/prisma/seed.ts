@@ -1,6 +1,6 @@
 /**
  * =============================================================================
- * [PROJECT_NAME] — database seed
+ * Velixa HR — database seed
  *
  * Fills an empty database with a small, realistic Hazel Mobile org so that
  * screens have something to render and you can confirm the setup works.
@@ -547,7 +547,7 @@ async function main(): Promise<void> {
     throw new Error('The seed script must never run with NODE_ENV=production.');
   }
 
-  console.log('Seeding [PROJECT_NAME] development data...\n');
+  console.log('Seeding Velixa HR development data...\n');
 
   // --- Permissions -----------------------------------------------------------
   for (const p of PERMISSIONS) {

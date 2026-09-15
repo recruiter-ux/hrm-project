@@ -1,8 +1,8 @@
 {
-  "name": "@project-name/web",
+  "name": "@velixa-hr/web",
   "version": "0.1.0",
   "private": true,
-  "description": "[PROJECT_NAME] web frontend (Next.js)",
+  "description": "Velixa HR web frontend (Next.js)",
   "scripts": {
     "dev": "next dev -p 3000",
     "build": "next build",
