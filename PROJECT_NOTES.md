@@ -39,6 +39,16 @@ separate sessions. Favour clarity and explicit comments over cleverness.
   controls.
 - **Org chart** built from current reporting lines.
 
+### Built (Phase 2, Module 1 — Leave Management)
+
+**Backend complete and verified. UI complete and rendering, but three actions
+were only exercised through the API, not clicked in a browser — see §10.**
+
+- Leave types, balances, requests, and the approval flow (14 tables now)
+- All six validation rules enforced and tested
+- Permission scoping respected throughout
+- Three screens: My leave, Request leave, Leave approvals
+
 ### Deliberately NOT built yet
 
 Do not add these without being asked — they are scheduled for later phases.
@@ -647,6 +657,113 @@ When starting a new session on this project:
 1. Read this file and `README.md`.
 2. `npm run db:up` — start Postgres and Redis.
 3. `npm run dev` — start both apps.
-4. Open <http://localhost:3000> — all four indicators should be green.
+4. Open <http://localhost:3000> and sign in as `sana.iqbal@hazelmobile.com`
+   (password `Password123!`).
 5. Confirm which module is being built, and check §6 for anything that must be
    settled first.
+
+> ⚠️ **Never run `npm run build` while `npm run dev` is running.** Both write to
+> `apps/web/.next`, and the production build clobbers the dev server's chunks —
+> every page then 500s with `Cannot find module './NNN.js'`. Recovery: stop the
+> dev server, delete `apps/web/.next`, restart. Cost me ten minutes; not a code
+> bug.
+
+---
+
+## 10. Leave Management (Phase 2, Module 1)
+
+### Three tables
+
+| Table | Holds |
+| --- | --- |
+| `LeaveType` | Reference data — Annual, Sick, Unpaid. Admin-editable. |
+| `LeaveBalance` | One person's entitlement, for one type, for one year. |
+| `LeaveRequest` | A request and its decision. |
+
+### Decisions worth knowing
+
+- **Only `entitledDays` is stored. Taken, pending, and remaining are derived**
+  by summing requests on every read. A stored "remaining" counter would be a
+  second source of truth that drifts the moment a request is cancelled or
+  back-dated. Cancelling a request frees its reserved days automatically,
+  because there is nothing to un-deduct.
+- **Pending requests reserve balance.** Otherwise someone could submit ten
+  requests for the same ten days and have them all pass validation.
+- **`LeaveRequest.days` is stored, not recomputed.** If the working-day rules
+  change later (a holiday calendar, a four-day week), an already-approved
+  request must keep the number it was approved with, or historical balances
+  silently change.
+- **`approverId` is a snapshot** taken at submission from the employee's open
+  `EmploymentAssignment`. If someone changes manager mid-request it stays with
+  the manager who was actually asked.
+- **Resolved from the assignment, not `Employee.managerId`.** The two agree, but
+  the assignment is the source of truth. Falls back to the department head when
+  someone has no manager, so a CEO's direct report is not stranded. A null
+  approver is still possible (the CEO's own request) — only HR can decide those.
+- **`requiresBalance` is per type**, which is how Unpaid leave can be taken with
+  zero entitlement without hardcoding "Annual only" into the validation.
+- **`REJECTED` and `CANCELLED` are separate states.** One is a manager's
+  decision, the other the employee withdrawing. Collapsing them would destroy
+  that distinction in any report.
+
+### The six validation rules, and where they live
+
+All in `LeaveService`, checked in this order so the message a person sees is
+the most useful one:
+
+1. End date not before start date
+2. Range contains at least one working day
+3. No overlap with an existing PENDING or APPROVED request
+4. Enough balance — skipped when `requiresBalance` is false
+5. Cannot approve or reject your own request
+6. Cannot decide a request that is already decided
+
+Rule 5 needs the **explicit self-check**, not just permissions: a manager holds
+`leave_request:approve` at TEAM scope, and TEAM includes themselves, so scope
+alone would let them approve their own leave. Verified directly.
+
+### Permission scopes
+
+| AccessRole | read | approve | create |
+| --- | --- | --- | --- |
+| employee | SELF | *(none at all)* | SELF |
+| manager | TEAM | TEAM | SELF |
+| department_head | DEPARTMENT | DEPARTMENT | SELF |
+| hr_admin | GLOBAL | GLOBAL | GLOBAL |
+
+`create` is SELF even for managers, deliberately — it is what stops a manager
+raising and approving a request in one motion. HR's GLOBAL approve is what
+unblocks a request whose manager has left the company.
+
+Verified: Zara sees 2 requests, Omar 3, Bilal 4, Sana 4; Omar gets a 404
+fetching Hassan's request by id.
+
+### ⚠️ What is NOT finished
+
+**Verified through the API but never clicked in a browser:**
+
+- Submitting a request through the form at `/leave/new`
+- Approve / Reject buttons on `/leave/approvals`
+- Withdraw button on `/leave`
+
+The pages render correctly with real data and the endpoints behind them are
+fully tested, so the risk is a wiring mistake in the click handlers, not in the
+logic. **Click these three before building anything on top.**
+
+**Not built at all:**
+
+- **No admin UI for leave types or balances.** The endpoints exist
+  (`POST /api/leave/types`, `POST /api/leave/balances`) but there is no screen,
+  so entitlements can only be changed by the seed or a direct API call.
+- **No notifications.** A manager is not told a request is waiting; an employee
+  is not told of a decision. This is the most visible gap for real use.
+- **No public holiday calendar.** Only weekends are excluded, so leave over Eid
+  or Christmas currently consumes those days. `working-days.ts` is the only file
+  that changes when this lands.
+- **No accrual.** A flat yearly entitlement set by HR. Real accrual (earned per
+  month, pro-rated for joiners and leavers, carry-over caps) belongs with
+  Payroll.
+- **No team leave calendar** — who is off when, which is what managers actually
+  want before approving.
+- **Requests spanning New Year** are attributed entirely to the start date's
+  year rather than split across two balances.

@@ -244,6 +244,16 @@ model Employee {
   /// directions — see the User model for why.
   user                User?                  @relation("UserEmployee")
 
+  // --- Leave (Phase 2) ---
+  leaveBalances       LeaveBalance[]         @relation("LeaveBalanceEmployee")
+  /// Leave this person has requested.
+  leaveRequests       LeaveRequest[]         @relation("LeaveRequestEmployee")
+  /// Leave requests routed to this person for a decision.
+  leaveApprovals      LeaveRequest[]         @relation("LeaveRequestApprover")
+  /// Leave requests this person actually decided. Usually the same as
+  /// leaveApprovals, but HR can decide a request routed to someone else.
+  leaveDecisions      LeaveRequest[]         @relation("LeaveRequestDecider")
+
   // --- Indexes --------------------------------------------------------------
   // An index makes filtering on a column fast. These cover the queries the
   // dashboards and directory screens will run constantly.
@@ -749,4 +759,161 @@ model RefreshToken {
   @@index([userId])
   @@index([expiresAt])
   @@map("refresh_tokens")
+}
+
+// =============================================================================
+// LEAVE MANAGEMENT (added in Phase 2)
+//
+// Three tables:
+//   LeaveType    — reference data: Annual, Sick, Unpaid
+//   LeaveBalance — how many days one person has of one type, in one year
+//   LeaveRequest — an actual request, and its approval decision
+//
+// DAYS ARE STORED AS Decimal(5,2), NOT INTEGERS. Half-days are a normal HR
+// requirement and retrofitting them onto an integer column later would mean
+// migrating every historical row.
+// =============================================================================
+
+/// The status of a leave request. Only four, deliberately — an "in review"
+/// state adds nothing until there is a multi-step approval chain.
+enum LeaveRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  /// Withdrawn by the employee. Distinct from REJECTED, which is a manager's
+  /// decision — the two mean very different things in a report.
+  CANCELLED
+}
+
+/// Reference data. Admin-editable by anyone holding `leave_type:manage`.
+model LeaveType {
+  id String @id @default(cuid())
+
+  /// Stable machine code used in seeds and code, e.g. "ANNUAL". Never renamed.
+  code String @unique
+  /// Display label, e.g. "Annual Leave". Safe to reword.
+  name String
+
+  description String?
+
+  /// Whether the employee is paid while on this leave. Not used by any logic
+  /// yet — it is here because Payroll will need it and adding a column later
+  /// means backfilling every row with a guess.
+  isPaid Boolean @default(true) @map("is_paid")
+
+  /// Whether requesting this type draws down a balance.
+  ///
+  /// Unpaid leave is the reason this exists: it is legitimate to take it
+  /// without any entitlement, so the balance check must be skippable per type
+  /// rather than hardcoded to "Annual only".
+  requiresBalance Boolean @default(true) @map("requires_balance")
+
+  /// Default entitlement handed to a new balance row for this type. Keeps the
+  /// "give everyone their yearly allocation" admin action to one click.
+  defaultAnnualDays Decimal @default(0) @map("default_annual_days") @db.Decimal(5, 2)
+
+  /// Retire a type without deleting it — historical requests still need to
+  /// resolve its name.
+  isActive Boolean @default(true) @map("is_active")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  balances LeaveBalance[]
+  requests LeaveRequest[]
+
+  @@index([isActive])
+  @@map("leave_types")
+}
+
+/// One employee's entitlement for one leave type in one year.
+///
+/// ACCRUAL IS DELIBERATELY NOT MODELLED YET. This phase uses a flat yearly
+/// entitlement set by HR. Real accrual (x days earned per month worked,
+/// pro-rated for joiners and leavers, with carry-over caps) is a substantial
+/// piece of logic and belongs with Payroll.
+///
+/// `entitledDays` is the only stored number. Everything else — taken, pending,
+/// remaining — is DERIVED by summing requests, so a balance can never drift
+/// out of step with the requests that consume it. See LeaveService.getBalances.
+model LeaveBalance {
+  id String @id @default(cuid())
+
+  employeeId String   @map("employee_id")
+  employee   Employee @relation("LeaveBalanceEmployee", fields: [employeeId], references: [id], onDelete: Cascade)
+
+  leaveTypeId String    @map("leave_type_id")
+  leaveType   LeaveType @relation(fields: [leaveTypeId], references: [id], onDelete: Restrict)
+
+  /// Calendar year this entitlement covers, e.g. 2026.
+  year Int
+
+  entitledDays Decimal @map("entitled_days") @db.Decimal(5, 2)
+
+  /// Free text for HR, e.g. "pro-rated, joined in August".
+  notes String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  /// One entitlement row per person, per type, per year.
+  @@unique([employeeId, leaveTypeId, year])
+  @@index([employeeId, year])
+  @@map("leave_balances")
+}
+
+/// A request for time off, and the decision on it.
+model LeaveRequest {
+  id String @id @default(cuid())
+
+  employeeId String   @map("employee_id")
+  employee   Employee @relation("LeaveRequestEmployee", fields: [employeeId], references: [id], onDelete: Cascade)
+
+  leaveTypeId String    @map("leave_type_id")
+  leaveType   LeaveType @relation(fields: [leaveTypeId], references: [id], onDelete: Restrict)
+
+  startDate DateTime @map("start_date") @db.Date
+  endDate   DateTime @map("end_date") @db.Date
+
+  /// Working days consumed, weekends excluded.
+  ///
+  /// STORED rather than recalculated on read. If the working-day rules change
+  /// later — a public holiday calendar, a four-day week — an already-approved
+  /// request must keep the number it was approved with, or historical balances
+  /// silently change.
+  days Decimal @db.Decimal(5, 2)
+
+  reason String
+
+  status LeaveRequestStatus @default(PENDING)
+
+  /// Who the request was routed to, captured at submission from the employee's
+  /// open EmploymentAssignment.
+  ///
+  /// A SNAPSHOT, on purpose. If the employee changes manager while a request
+  /// is pending, it stays with the manager who was asked — and the record of
+  /// who was asked survives.
+  approverId String?   @map("approver_id")
+  approver   Employee? @relation("LeaveRequestApprover", fields: [approverId], references: [id], onDelete: SetNull)
+
+  /// Who actually decided. Usually the approver, but HR can decide any request.
+  decidedById String?   @map("decided_by_id")
+  decidedBy   Employee? @relation("LeaveRequestDecider", fields: [decidedById], references: [id], onDelete: SetNull)
+
+  decidedAt       DateTime? @map("decided_at")
+  /// The manager's note when approving or rejecting.
+  decisionComment String?   @map("decision_comment")
+
+  cancelledAt DateTime? @map("cancelled_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // Covers "my requests", "requests awaiting my decision", and the overlap
+  // check, which scans one employee's requests by date.
+  @@index([employeeId, status])
+  @@index([approverId, status])
+  @@index([employeeId, startDate, endDate])
+  @@index([status])
+  @@map("leave_requests")
 }

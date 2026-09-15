@@ -114,6 +114,91 @@ const PERMISSIONS: Array<{
     module: 'core_hr',
     description: 'Grant access roles and edit permissions',
   },
+
+  // --- Leave module (Phase 2) ---
+  { resource: 'leave_type', action: 'read', module: 'leave', description: 'View leave types' },
+  {
+    resource: 'leave_type',
+    action: 'manage',
+    module: 'leave',
+    description: 'Create and edit leave types',
+  },
+  {
+    resource: 'leave_balance',
+    action: 'read',
+    module: 'leave',
+    description: 'View leave balances',
+  },
+  {
+    resource: 'leave_balance',
+    action: 'manage',
+    module: 'leave',
+    description: 'Set leave entitlements',
+  },
+  {
+    resource: 'leave_request',
+    action: 'read',
+    module: 'leave',
+    description: 'View leave requests',
+  },
+  {
+    resource: 'leave_request',
+    action: 'create',
+    module: 'leave',
+    description: 'Submit leave requests',
+  },
+  {
+    resource: 'leave_request',
+    action: 'approve',
+    module: 'leave',
+    description: 'Approve or reject leave requests',
+  },
+  {
+    resource: 'leave_request',
+    action: 'cancel',
+    module: 'leave',
+    description: 'Withdraw a leave request',
+  },
+];
+
+// -----------------------------------------------------------------------------
+// 1b. LEAVE TYPES (Phase 2)
+//
+// UNPAID has requiresBalance: false — it is legitimate to take unpaid leave
+// without any entitlement, so the balance check is skipped for it.
+// -----------------------------------------------------------------------------
+const LEAVE_TYPES: Array<{
+  code: string;
+  name: string;
+  description: string;
+  isPaid: boolean;
+  requiresBalance: boolean;
+  defaultAnnualDays: number;
+}> = [
+  {
+    code: 'ANNUAL',
+    name: 'Annual Leave',
+    description: 'Paid holiday entitlement.',
+    isPaid: true,
+    requiresBalance: true,
+    defaultAnnualDays: 20,
+  },
+  {
+    code: 'SICK',
+    name: 'Sick Leave',
+    description: 'Paid time off for illness. A medical note may be requested.',
+    isPaid: true,
+    requiresBalance: true,
+    defaultAnnualDays: 10,
+  },
+  {
+    code: 'UNPAID',
+    name: 'Unpaid Leave',
+    description: 'Time off without pay. Requires no entitlement.',
+    isPaid: false,
+    requiresBalance: false,
+    defaultAnnualDays: 0,
+  },
 ];
 
 // -----------------------------------------------------------------------------
@@ -157,6 +242,16 @@ const ACCESS_ROLES: Array<{
       { permission: 'document:upload', scope: PermissionScope.GLOBAL },
       { permission: 'document:read_confidential', scope: PermissionScope.GLOBAL },
       { permission: 'access_role:read', scope: PermissionScope.GLOBAL },
+      // Leave: HR sets entitlements and can decide any request, including ones
+      // whose manager has left the company.
+      { permission: 'leave_type:read', scope: PermissionScope.GLOBAL },
+      { permission: 'leave_type:manage', scope: PermissionScope.GLOBAL },
+      { permission: 'leave_balance:read', scope: PermissionScope.GLOBAL },
+      { permission: 'leave_balance:manage', scope: PermissionScope.GLOBAL },
+      { permission: 'leave_request:read', scope: PermissionScope.GLOBAL },
+      { permission: 'leave_request:create', scope: PermissionScope.GLOBAL },
+      { permission: 'leave_request:approve', scope: PermissionScope.GLOBAL },
+      { permission: 'leave_request:cancel', scope: PermissionScope.GLOBAL },
     ],
   },
   {
@@ -170,6 +265,12 @@ const ACCESS_ROLES: Array<{
       { permission: 'department:read', scope: PermissionScope.DEPARTMENT },
       { permission: 'role:read', scope: PermissionScope.GLOBAL },
       { permission: 'document:read', scope: PermissionScope.DEPARTMENT },
+      { permission: 'leave_type:read', scope: PermissionScope.GLOBAL },
+      { permission: 'leave_balance:read', scope: PermissionScope.DEPARTMENT },
+      { permission: 'leave_request:read', scope: PermissionScope.DEPARTMENT },
+      { permission: 'leave_request:create', scope: PermissionScope.SELF },
+      { permission: 'leave_request:approve', scope: PermissionScope.DEPARTMENT },
+      { permission: 'leave_request:cancel', scope: PermissionScope.SELF },
     ],
   },
   {
@@ -182,6 +283,14 @@ const ACCESS_ROLES: Array<{
       { permission: 'department:read', scope: PermissionScope.DEPARTMENT },
       { permission: 'role:read', scope: PermissionScope.GLOBAL },
       { permission: 'document:read', scope: PermissionScope.TEAM },
+      // Leave: a manager decides their direct reports' requests, and submits
+      // their own (SELF) — which is what stops them approving their own.
+      { permission: 'leave_type:read', scope: PermissionScope.GLOBAL },
+      { permission: 'leave_balance:read', scope: PermissionScope.TEAM },
+      { permission: 'leave_request:read', scope: PermissionScope.TEAM },
+      { permission: 'leave_request:create', scope: PermissionScope.SELF },
+      { permission: 'leave_request:approve', scope: PermissionScope.TEAM },
+      { permission: 'leave_request:cancel', scope: PermissionScope.SELF },
     ],
   },
   {
@@ -201,6 +310,14 @@ const ACCESS_ROLES: Array<{
     grants: [
       { permission: 'employee:read', scope: PermissionScope.SELF },
       { permission: 'employment_assignment:read', scope: PermissionScope.SELF },
+      // Leave: everyone can request their own and withdraw it. Note there is
+      // no leave_request:approve here at all — an ordinary employee has no
+      // approval power whatsoever.
+      { permission: 'leave_type:read', scope: PermissionScope.GLOBAL },
+      { permission: 'leave_balance:read', scope: PermissionScope.SELF },
+      { permission: 'leave_request:read', scope: PermissionScope.SELF },
+      { permission: 'leave_request:create', scope: PermissionScope.SELF },
+      { permission: 'leave_request:cancel', scope: PermissionScope.SELF },
       { permission: 'department:read', scope: PermissionScope.GLOBAL },
       { permission: 'role:read', scope: PermissionScope.GLOBAL },
       { permission: 'document:read', scope: PermissionScope.SELF },
@@ -753,6 +870,57 @@ async function main(): Promise<void> {
       data: { headEmployeeId: employee.id },
     });
   }
+
+  // --- Leave types + starting balances (Phase 2) -----------------------------
+  for (const type of LEAVE_TYPES) {
+    await prisma.leaveType.upsert({
+      where: { code: type.code },
+      update: {
+        name: type.name,
+        description: type.description,
+        isPaid: type.isPaid,
+        requiresBalance: type.requiresBalance,
+        defaultAnnualDays: type.defaultAnnualDays,
+      },
+      create: type,
+    });
+  }
+  console.log(`  Leave types  : ${LEAVE_TYPES.length}`);
+
+  // Give everyone this year's default entitlement for each type that needs one.
+  // Real accrual (earned per month, pro-rated, carried over) comes with
+  // Payroll — this phase is a flat yearly allocation set by HR.
+  const leaveYear = new Date().getUTCFullYear();
+  let balanceCount = 0;
+
+  for (const emp of EMPLOYEES) {
+    const employee = await prisma.employee.findUniqueOrThrow({
+      where: { employeeNumber: emp.employeeNumber },
+    });
+
+    for (const type of LEAVE_TYPES.filter((t) => t.requiresBalance)) {
+      const leaveType = await prisma.leaveType.findUniqueOrThrow({ where: { code: type.code } });
+
+      await prisma.leaveBalance.upsert({
+        where: {
+          employeeId_leaveTypeId_year: {
+            employeeId: employee.id,
+            leaveTypeId: leaveType.id,
+            year: leaveYear,
+          },
+        },
+        update: { entitledDays: type.defaultAnnualDays },
+        create: {
+          employeeId: employee.id,
+          leaveTypeId: leaveType.id,
+          year: leaveYear,
+          entitledDays: type.defaultAnnualDays,
+        },
+      });
+      balanceCount += 1;
+    }
+  }
+  console.log(`  Leave balances: ${balanceCount} (${leaveYear})`);
 
   // --- Login accounts --------------------------------------------------------
   // Everyone in EMPLOYEES gets an account with the same development password,

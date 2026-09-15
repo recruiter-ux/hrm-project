@@ -42,6 +42,10 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   const navItems = [
     { href: '/employees', label: 'Employees', show: can('employee:read') },
     { href: '/org-chart', label: 'Org chart', show: can('employee:read') },
+    { href: '/leave', label: 'My leave', show: can('leave_request:create') },
+    // Only shown to people who can actually decide something — an ordinary
+    // employee has no leave_request:approve permission at any scope.
+    { href: '/leave/approvals', label: 'Approvals', show: can('leave_request:approve') },
   ].filter((item) => item.show);
 
   async function handleLogout() {

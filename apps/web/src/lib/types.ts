@@ -150,6 +150,65 @@ export interface CurrentUser {
   permissions: Record<string, PermissionScope>;
 }
 
+// --- Leave (Phase 2) ---------------------------------------------------------
+
+export type LeaveRequestStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED';
+
+export interface LeaveType {
+  id: string;
+  code: string;
+  name: string;
+  description: string | null;
+  isPaid: boolean;
+  /** False for unpaid leave, which can be taken with no entitlement. */
+  requiresBalance: boolean;
+  defaultAnnualDays: number;
+  isActive: boolean;
+}
+
+export interface LeaveBalanceSummary {
+  leaveTypeId: string;
+  code: string;
+  name: string;
+  requiresBalance: boolean;
+  year: number;
+  entitledDays: number;
+  approvedDays: number;
+  pendingDays: number;
+  remainingDays: number;
+}
+
+export interface LeaveBalancesResponse {
+  employeeId: string;
+  year: number;
+  balances: LeaveBalanceSummary[];
+}
+
+export interface LeaveRequestItem {
+  id: string;
+  startDate: string;
+  endDate: string;
+  days: number;
+  reason: string;
+  status: LeaveRequestStatus;
+  decisionComment: string | null;
+  decidedAt: string | null;
+  createdAt: string;
+  employee: PersonRef & { workEmail: string };
+  leaveType: { id: string; code: string; name: string; requiresBalance: boolean };
+  approver: { id: string; firstName: string; lastName: string } | null;
+  decidedBy: { id: string; firstName: string; lastName: string } | null;
+}
+
+export interface LeaveRequestsResponse {
+  items: LeaveRequestItem[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+  scope: PermissionScope;
+}
+
 export interface FormOptions {
   roles: RoleRef[];
   departments: DepartmentRef[];

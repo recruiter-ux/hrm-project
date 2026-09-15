@@ -9,6 +9,7 @@ import { validateEnv } from './config/env.validation';
 import { DocumentsModule } from './documents/documents.module';
 import { EmployeesModule } from './employees/employees.module';
 import { HealthModule } from './health/health.module';
+import { LeaveModule } from './leave/leave.module';
 import { PermissionsGuard } from './permissions/permissions.guard';
 import { PermissionsModule } from './permissions/permissions.module';
 import { PrismaModule } from './prisma/prisma.module';
@@ -48,6 +49,7 @@ import { StorageModule } from './storage/storage.module';
     AuthModule,
     EmployeesModule,
     DocumentsModule,
+    LeaveModule,
     HealthModule,
   ],
   providers: [
