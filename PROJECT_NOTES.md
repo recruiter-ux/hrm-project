@@ -41,13 +41,13 @@ separate sessions. Favour clarity and explicit comments over cleverness.
 
 ### Built (Phase 2, Module 1 — Leave Management)
 
-**Backend complete and verified. UI complete and rendering, but three actions
-were only exercised through the API, not clicked in a browser — see §10.**
+**Complete and verified end to end, backend and UI.**
 
 - Leave types, balances, requests, and the approval flow (14 tables now)
 - All six validation rules enforced and tested
 - Permission scoping respected throughout
-- Three screens: My leave, Request leave, Leave approvals
+- Three screens: My leave, Request leave, Leave approvals — every button
+  clicked through in a browser, not just exercised through the API
 
 ### Deliberately NOT built yet
 
@@ -738,19 +738,22 @@ unblocks a request whose manager has left the company.
 Verified: Zara sees 2 requests, Omar 3, Bilal 4, Sana 4; Omar gets a 404
 fetching Hassan's request by id.
 
-### ⚠️ What is NOT finished
+### Verified in a browser
 
-**Verified through the API but never clicked in a browser:**
+Walked end to end on 2026-09-17, as three different people:
 
-- Submitting a request through the form at `/leave/new`
-- Approve / Reject buttons on `/leave/approvals`
-- Withdraw button on `/leave`
+1. **Zara (employee)** submits 3 days at `/leave/new` → lands on `/leave` as
+   PENDING, routed to Omar, balance drops 15 → 12 immediately.
+2. **Omar (manager)** sees it at `/leave/approvals`, types a comment, clicks
+   **Approve** → queue empties, decision and comment recorded against his name.
+3. **Zara** clicks **Withdraw** on the approved future-dated request → status
+   becomes CANCELLED and the balance returns 12 → **15** on its own, because
+   balances are derived rather than stored. Nothing to un-deduct.
 
-The pages render correctly with real data and the endpoints behind them are
-fully tested, so the risk is a wiring mistake in the click handlers, not in the
-logic. **Click these three before building anything on top.**
+Permission gating confirmed in the UI too: Zara's navigation has no
+**Approvals** link, Omar's does.
 
-**Not built at all:**
+### ⚠️ What is NOT built
 
 - **No admin UI for leave types or balances.** The endpoints exist
   (`POST /api/leave/types`, `POST /api/leave/balances`) but there is no screen,
