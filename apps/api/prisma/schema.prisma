@@ -253,6 +253,10 @@ model Employee {
   /// Leave requests this person actually decided. Usually the same as
   /// leaveApprovals, but HR can decide a request routed to someone else.
   leaveDecisions      LeaveRequest[]         @relation("LeaveRequestDecider")
+  /// Leave policy versions this person authored — the audit trail for
+  /// "who changed the Annual Leave quota, and when?".
+  leavePoliciesCreated LeaveTypePolicy[]     @relation("LeavePolicyCreator")
+  leavePoliciesUpdated LeaveTypePolicy[]     @relation("LeavePolicyUpdater")
 
   // --- Indexes --------------------------------------------------------------
   // An index makes filtering on a column fast. These cover the queries the
@@ -764,10 +768,30 @@ model RefreshToken {
 // =============================================================================
 // LEAVE MANAGEMENT (added in Phase 2)
 //
-// Three tables:
-//   LeaveType    — reference data: Annual, Sick, Unpaid
-//   LeaveBalance — how many days one person has of one type, in one year
-//   LeaveRequest — an actual request, and its approval decision
+// Four tables:
+//   LeaveType       — identity only: the NAME of a kind of leave
+//   LeaveTypePolicy — the RULES, effective-dated. Quota, notice, approval.
+//   LeaveBalance    — per-employee overrides and carry-forward, per year
+//   LeaveRequest    — an actual request, and its approval decision
+//
+// WHY THE RULES ARE SPLIT OUT OF LeaveType
+// Leave policy changes. When HR drops Annual Leave from 8 days to 6 effective
+// 1 July, the system must still be able to answer "what was the quota in
+// March?" — so the old rule cannot be overwritten.
+//
+// This is the SAME effective-dated pattern as EmploymentAssignment, applied to
+// policy instead of people:
+//
+//   EmploymentAssignment : Employee    :: LeaveTypePolicy : LeaveType
+//   "what job did this person hold on date D"
+//   "what rules did this leave type have on date D"
+//
+// Both use effectiveFrom / effectiveTo (null = current), both forbid overlaps
+// at the database level, and both are changed through a service that closes the
+// old row and opens a new one in one transaction. Nothing is ever rewritten.
+//
+// The pattern is reusable for any future HR policy area — probation rules,
+// notice periods, working-hours patterns. See PROJECT_NOTES.md §11.
 //
 // DAYS ARE STORED AS Decimal(5,2), NOT INTEGERS. Half-days are a normal HR
 // requirement and retrofitting them onto an integer column later would mean
@@ -785,13 +809,33 @@ enum LeaveRequestStatus {
   CANCELLED
 }
 
-/// Reference data. Admin-editable by anyone holding `leave_type:manage`.
+/// How a year's entitlement is worked out when the quota changes mid-year.
+///
+/// Configurable per leave type rather than hardcoded, because companies differ
+/// and this is exactly the kind of rule that should not need a developer.
+enum ProrationMethod {
+  /// Each policy period contributes quota × (its days in the year ÷ days in
+  /// the year). 8 days Jan–Jun plus 6 days Jul–Dec gives ≈ 6.99 for 2026.
+  /// This is the default and what most companies mean by "pro-rated".
+  PRORATED_BY_DAYS
+
+  /// The quota of whichever policy is effective LATEST in the year applies to
+  /// the whole year. Simpler, and what some companies do — but it means a
+  /// mid-year cut retroactively reduces the whole year.
+  LATEST_POLICY_IN_YEAR
+}
+
+/// IDENTITY ONLY. What this kind of leave is called.
+///
+/// All the RULES — quota, notice period, whether approval is needed — live on
+/// LeaveTypePolicy so they can change over time without destroying history.
+/// Nothing here affects a calculation.
 model LeaveType {
   id String @id @default(cuid())
 
-  /// Stable machine code used in seeds and code, e.g. "ANNUAL". Never renamed.
+  /// Stable machine code, e.g. "ANNUAL". Used by the seed; never renamed.
   code String @unique
-  /// Display label, e.g. "Annual Leave". Safe to reword.
+  /// Display label, e.g. "Annual Leave". Safe to reword at any time.
   name String
 
   description String?
@@ -808,17 +852,20 @@ model LeaveType {
   /// rather than hardcoded to "Annual only".
   requiresBalance Boolean @default(true) @map("requires_balance")
 
-  /// Default entitlement handed to a new balance row for this type. Keeps the
-  /// "give everyone their yearly allocation" admin action to one click.
-  defaultAnnualDays Decimal @default(0) @map("default_annual_days") @db.Decimal(5, 2)
+  /// How mid-year quota changes are turned into a year's entitlement.
+  prorationMethod ProrationMethod @default(PRORATED_BY_DAYS) @map("proration_method")
 
-  /// Retire a type without deleting it — historical requests still need to
-  /// resolve its name.
+  /// Retire a type without deleting it.
+  ///
+  /// There is deliberately NO hard delete: `onDelete: Restrict` on every
+  /// foreign key pointing here means the database itself refuses to remove a
+  /// type that any request, balance, or policy references.
   isActive Boolean @default(true) @map("is_active")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
+  policies LeaveTypePolicy[]
   balances LeaveBalance[]
   requests LeaveRequest[]
 
@@ -826,16 +873,101 @@ model LeaveType {
   @@map("leave_types")
 }
 
-/// One employee's entitlement for one leave type in one year.
+/// =============================================================================
+/// THE RULES FOR ONE LEAVE TYPE, OVER ONE PERIOD OF TIME
 ///
-/// ACCRUAL IS DELIBERATELY NOT MODELLED YET. This phase uses a flat yearly
-/// entitlement set by HR. Real accrual (x days earned per month worked,
-/// pro-rated for joiners and leavers, with carry-over caps) is a substantial
-/// piece of logic and belongs with Payroll.
+/// One row = "between these dates, this leave type allowed N days, needed
+/// M days' notice, and did or did not require approval."
 ///
-/// `entitledDays` is the only stored number. Everything else — taken, pending,
-/// remaining — is DERIVED by summing requests, so a balance can never drift
-/// out of step with the requests that consume it. See LeaveService.getBalances.
+///   Jan 1 2026 – Jun 30 2026   Annual Leave   8 days
+///   Jul 1 2026 – (current)     Annual Leave   6 days
+///
+/// Both rows survive. `getPolicyOn(type, 2026-03-15)` returns the 8-day row;
+/// `getPolicyOn(type, 2026-08-15)` returns the 6-day one. Changing the policy
+/// NEVER rewrites an earlier row.
+///
+/// ⚠️ OVERLAP PREVENTION IS A DATABASE CONSTRAINT, NOT JUST A SERVICE CHECK.
+/// Prisma cannot express an exclusion constraint, so the first migration for
+/// this table appends by hand:
+///
+///   CREATE EXTENSION IF NOT EXISTS btree_gist;
+///   ALTER TABLE "leave_type_policies"
+///     ADD CONSTRAINT "leave_type_policies_no_overlap"
+///     EXCLUDE USING gist (
+///       "leave_type_id" WITH =,
+///       daterange("effective_from", "effective_to", '[]') WITH &&
+///     );
+///
+/// That makes two overlapping periods for one type impossible even if the
+/// service layer were wrong. The service checks too, to give a readable error
+/// rather than a raw constraint violation. See PROJECT_NOTES.md §11.
+/// =============================================================================
+model LeaveTypePolicy {
+  id String @id @default(cuid())
+
+  leaveTypeId String    @map("leave_type_id")
+  leaveType   LeaveType @relation(fields: [leaveTypeId], references: [id], onDelete: Restrict)
+
+  /// Days granted per full leave year under this policy.
+  quotaDays Decimal @map("quota_days") @db.Decimal(5, 2)
+
+  /// When false, a request of this type is APPROVED the moment it is
+  /// submitted, and flagged `autoApproved` so reports can tell the difference
+  /// between "a manager agreed" and "no approval was needed".
+  approvalRequired Boolean @default(true) @map("approval_required")
+
+  /// Whether unused days may be carried into the next year. The carried amount
+  /// itself is stored per employee on LeaveBalance.
+  carryForwardEnabled Boolean @default(false) @map("carry_forward_enabled")
+
+  /// Cap on carried days. Null means uncapped.
+  carryForwardMaxDays Decimal? @map("carry_forward_max_days") @db.Decimal(5, 2)
+
+  /// How many CALENDAR days ahead a request must be submitted. 0 means leave
+  /// can be requested for tomorrow — appropriate for Sick Leave.
+  minNoticeDays Int @default(0) @map("min_notice_days")
+
+  /// First day this policy applies.
+  effectiveFrom DateTime @map("effective_from") @db.Date
+  /// Last day it applies. NULL means "still current".
+  effectiveTo   DateTime? @map("effective_to") @db.Date
+
+  /// Why HR made this change, e.g. "Board approved reduction for H2 2026".
+  notes String?
+
+  createdById String?   @map("created_by_id")
+  createdBy   Employee? @relation("LeavePolicyCreator", fields: [createdById], references: [id], onDelete: SetNull)
+
+  updatedById String?   @map("updated_by_id")
+  updatedBy   Employee? @relation("LeavePolicyUpdater", fields: [updatedById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  /// Requests judged against this policy version.
+  requests LeaveRequest[] @relation("LeaveRequestAppliedPolicy")
+
+  /// A leave type cannot have two policies starting the same day. Also the
+  /// natural key that lets the seed re-run safely.
+  @@unique([leaveTypeId, effectiveFrom])
+  @@index([leaveTypeId, effectiveTo])
+  @@map("leave_type_policies")
+}
+
+/// Per-employee adjustments to an entitlement, for one type, for one year.
+///
+/// ⚠️ THIS TABLE NO LONGER STORES THE ENTITLEMENT. Entitlement is DERIVED from
+/// LeaveTypePolicy, so a policy change is reflected everywhere without touching
+/// employee rows — and, crucially, a change to the CURRENT policy cannot
+/// retroactively alter a past year, because past years resolve against the
+/// policies that were effective then.
+///
+/// A row here exists only when someone needs to deviate from the policy:
+///   - `entitlementOverrideDays` — HR grants a different number (a joiner
+///     pro-rated by start date, a negotiated contract)
+///   - `carriedForwardDays` — unused days brought in from last year
+///
+/// No row at all is the normal case, and means "policy applies as written".
 model LeaveBalance {
   id String @id @default(cuid())
 
@@ -845,10 +977,16 @@ model LeaveBalance {
   leaveTypeId String    @map("leave_type_id")
   leaveType   LeaveType @relation(fields: [leaveTypeId], references: [id], onDelete: Restrict)
 
-  /// Calendar year this entitlement covers, e.g. 2026.
+  /// Calendar year this row covers, e.g. 2026.
   year Int
 
-  entitledDays Decimal @map("entitled_days") @db.Decimal(5, 2)
+  /// Replaces the policy-derived entitlement entirely when set. Null means
+  /// "use the policy calculation", which is the normal case.
+  entitlementOverrideDays Decimal? @map("entitlement_override_days") @db.Decimal(5, 2)
+
+  /// Days brought forward from the previous year. Added to the entitlement.
+  /// Set by HR for now; an automatic year-end roll-over job is future work.
+  carriedForwardDays Decimal @default(0) @map("carried_forward_days") @db.Decimal(5, 2)
 
   /// Free text for HR, e.g. "pro-rated, joined in August".
   notes String?
@@ -856,7 +994,7 @@ model LeaveBalance {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  /// One entitlement row per person, per type, per year.
+  /// One row per person, per type, per year.
   @@unique([employeeId, leaveTypeId, year])
   @@index([employeeId, year])
   @@map("leave_balances")
@@ -887,22 +1025,39 @@ model LeaveRequest {
 
   status LeaveRequestStatus @default(PENDING)
 
-  /// Who the request was routed to, captured at submission from the employee's
-  /// open EmploymentAssignment.
+  /// ⚠️ AUDIT ONLY — this does NOT decide who may approve.
   ///
-  /// A SNAPSHOT, on purpose. If the employee changes manager while a request
-  /// is pending, it stays with the manager who was asked — and the record of
-  /// who was asked survives.
+  /// Records which manager the request was routed to at submission, resolved
+  /// from the employee's open EmploymentAssignment. It answers "who was asked?"
+  /// months later, when the reporting line has changed.
+  ///
+  /// Authorisation and the approvals queue both resolve the CURRENT manager
+  /// live, so a request never strands with someone who has moved on. See
+  /// LeaveService.resolveCurrentApprover.
   approverId String?   @map("approver_id")
   approver   Employee? @relation("LeaveRequestApprover", fields: [approverId], references: [id], onDelete: SetNull)
 
-  /// Who actually decided. Usually the approver, but HR can decide any request.
+  /// Who actually decided. Null on an auto-approved request — nobody decided it.
   decidedById String?   @map("decided_by_id")
   decidedBy   Employee? @relation("LeaveRequestDecider", fields: [decidedById], references: [id], onDelete: SetNull)
 
   decidedAt       DateTime? @map("decided_at")
   /// The manager's note when approving or rejecting.
   decisionComment String?   @map("decision_comment")
+
+  /// True when the applicable policy had `approvalRequired = false`, so the
+  /// request was APPROVED on submission with no human involved. Kept separate
+  /// from `decidedById = null` so a report can distinguish "auto-approved" from
+  /// "approved by someone who has since been deleted".
+  autoApproved Boolean @default(false) @map("auto_approved")
+
+  /// The policy version in force for these dates, captured at submission.
+  ///
+  /// Not used for authorisation — it is the audit trail for "which rule was
+  /// this judged against?", which matters once policy has changed underneath a
+  /// historical request.
+  appliedPolicyId String?          @map("applied_policy_id")
+  appliedPolicy   LeaveTypePolicy? @relation("LeaveRequestAppliedPolicy", fields: [appliedPolicyId], references: [id], onDelete: SetNull)
 
   cancelledAt DateTime? @map("cancelled_at")
 

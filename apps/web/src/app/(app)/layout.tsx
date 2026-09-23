@@ -46,6 +46,8 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     // Only shown to people who can actually decide something — an ordinary
     // employee has no leave_request:approve permission at any scope.
     { href: '/leave/approvals', label: 'Approvals', show: can('leave_request:approve') },
+    // HR-only. No manager or employee AccessRole grants leave_policy:read.
+    { href: '/leave/policies', label: 'Leave policy', show: can('leave_policy:read') },
   ].filter((item) => item.show);
 
   async function handleLogout() {

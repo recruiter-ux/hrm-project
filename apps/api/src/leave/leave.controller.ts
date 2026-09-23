@@ -5,14 +5,18 @@ import type { AuthenticatedUser, ResolvedPermission } from '../auth/auth.types';
 import { CurrentUser, Scope } from '../auth/decorators/current-user.decorator';
 import { RequirePermission } from '../permissions/decorators/require-permission.decorator';
 import {
+  AmendPolicyVersionDto,
   CreateLeaveRequestDto,
   CreateLeaveTypeDto,
+  CreatePolicyVersionDto,
   DecideLeaveRequestDto,
+  PolicyOnDateDto,
   QueryBalancesDto,
   QueryLeaveRequestsDto,
   SetBalanceDto,
   UpdateLeaveTypeDto,
 } from './dto/leave.dto';
+import { LeavePolicyService } from './leave-policy.service';
 import { LeaveService } from './leave.service';
 import { LeaveTypesService } from './leave-types.service';
 
@@ -27,9 +31,10 @@ export class LeaveController {
   constructor(
     private readonly leave: LeaveService,
     private readonly types: LeaveTypesService,
+    private readonly policies: LeavePolicyService,
   ) {}
 
-  // --- Leave types (reference data) ------------------------------------------
+  // --- Leave types (identity) ------------------------------------------------
 
   @Get('types')
   @RequirePermission('leave_type:read')
@@ -37,22 +42,90 @@ export class LeaveController {
     return this.types.findAll(includeInactive === 'true');
   }
 
+  @Get('types/:id')
+  @RequirePermission('leave_type:read')
+  getType(@Param('id') id: string) {
+    return this.types.findOne(id);
+  }
+
   @Post('types')
-  @RequirePermission('leave_type:manage')
-  createType(@Body() dto: CreateLeaveTypeDto) {
-    return this.types.create(dto);
+  @RequirePermission('leave_policy:manage')
+  createType(@CurrentUser() user: AuthenticatedUser, @Body() dto: CreateLeaveTypeDto) {
+    return this.types.create(dto, user.employeeId);
   }
 
   @Patch('types/:id')
-  @RequirePermission('leave_type:manage')
+  @RequirePermission('leave_policy:manage')
   updateType(@Param('id') id: string, @Body() dto: UpdateLeaveTypeDto) {
     return this.types.update(id, dto);
   }
 
-  @Post('types/:id/retire')
-  @RequirePermission('leave_type:manage')
-  retireType(@Param('id') id: string) {
-    return this.types.deactivate(id);
+  /** Archive, not delete — historical requests must keep resolving the name. */
+  @Post('types/:id/archive')
+  @RequirePermission('leave_policy:manage')
+  archiveType(@Param('id') id: string) {
+    return this.types.archive(id);
+  }
+
+  @Post('types/:id/restore')
+  @RequirePermission('leave_policy:manage')
+  restoreType(@Param('id') id: string) {
+    return this.types.restore(id);
+  }
+
+  // --- Policy versions (effective-dated rules) -------------------------------
+
+  /** Full version history for one type, newest first. */
+  @Get('types/:id/policies')
+  @RequirePermission('leave_policy:read')
+  listPolicyVersions(@Param('id') id: string) {
+    return this.policies.listVersions(id);
+  }
+
+  /**
+   * THE HISTORICAL LOOKUP.
+   * `GET /api/leave/types/:id/policy-on?date=2026-03-15` → the rules in force
+   * that day, not today's rules.
+   */
+  @Get('types/:id/policy-on')
+  @RequirePermission('leave_policy:read')
+  async policyOnDate(@Param('id') id: string, @Query() query: PolicyOnDateDto) {
+    const policy = await this.policies.getPolicyOn(id, new Date(query.date));
+    return policy ? this.policies.shape(policy) : null;
+  }
+
+  /** How a year's entitlement is derived, period by period. */
+  @Get('types/:id/entitlement')
+  @RequirePermission('leave_policy:read')
+  entitlement(@Param('id') id: string, @Query('year') year?: string) {
+    const targetYear = year ? parseInt(year, 10) : new Date().getUTCFullYear();
+    return this.policies.calculateEntitlement(id, targetYear);
+  }
+
+  /** Opens a new version and closes the current one. Never rewrites history. */
+  @Post('types/:id/policies')
+  @RequirePermission('leave_policy:manage')
+  createPolicyVersion(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+    @Body() dto: CreatePolicyVersionDto,
+  ) {
+    return this.policies.createVersion(
+      id,
+      { ...dto, effectiveFrom: new Date(dto.effectiveFrom) },
+      user.employeeId,
+    );
+  }
+
+  /** Corrects a note or carry-forward cap. Quota and dates are immutable. */
+  @Patch('policies/:policyId')
+  @RequirePermission('leave_policy:manage')
+  amendPolicyVersion(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('policyId') policyId: string,
+    @Body() dto: AmendPolicyVersionDto,
+  ) {
+    return this.policies.amendVersion(policyId, dto, user.employeeId);
   }
 
   // --- Balances ---------------------------------------------------------------

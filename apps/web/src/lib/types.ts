@@ -154,6 +154,31 @@ export interface CurrentUser {
 
 export type LeaveRequestStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'CANCELLED';
 
+export type ProrationMethod = 'PRORATED_BY_DAYS' | 'LATEST_POLICY_IN_YEAR';
+
+/** One effective-dated version of a leave type's rules. */
+export interface LeaveTypePolicy {
+  id: string;
+  leaveTypeId: string;
+  quotaDays: number;
+  approvalRequired: boolean;
+  carryForwardEnabled: boolean;
+  carryForwardMaxDays: number | null;
+  minNoticeDays: number;
+  effectiveFrom: string;
+  /** Null means this is the version currently in force. */
+  effectiveTo: string | null;
+  notes: string | null;
+  createdBy?: { id: string; firstName: string; lastName: string } | null;
+  updatedBy?: { id: string; firstName: string; lastName: string } | null;
+  createdAt: string;
+}
+
+/**
+ * The type's IDENTITY. All rules live on `currentPolicy`, which is resolved
+ * for today — which is why a quota change takes effect on its date without
+ * anyone editing the type.
+ */
 export interface LeaveType {
   id: string;
   code: string;
@@ -162,8 +187,31 @@ export interface LeaveType {
   isPaid: boolean;
   /** False for unpaid leave, which can be taken with no entitlement. */
   requiresBalance: boolean;
-  defaultAnnualDays: number;
+  prorationMethod: ProrationMethod;
   isActive: boolean;
+  currentPolicy: LeaveTypePolicy | null;
+  versionCount: number;
+}
+
+export interface LeaveTypeDetail extends LeaveType {
+  versions: LeaveTypePolicy[];
+  usage: { requests: number; balances: number };
+}
+
+export interface EntitlementBreakdownRow {
+  policyId: string;
+  quotaDays: number;
+  from: string;
+  to: string;
+  daysInPeriod: number;
+  contribution: number;
+}
+
+export interface EntitlementResult {
+  year: number;
+  method: ProrationMethod;
+  entitledDays: number;
+  breakdown: EntitlementBreakdownRow[];
 }
 
 export interface LeaveBalanceSummary {
@@ -172,10 +220,15 @@ export interface LeaveBalanceSummary {
   name: string;
   requiresBalance: boolean;
   year: number;
+  /** Derived from the effective-dated policy, unless HR set an override. */
   entitledDays: number;
-  approvedDays: number;
+  isOverridden: boolean;
+  carriedForwardDays: number;
+  usedDays: number;
   pendingDays: number;
   remainingDays: number;
+  /** Empty when overridden — there is no policy calculation to show. */
+  entitlementBreakdown: EntitlementBreakdownRow[];
 }
 
 export interface LeaveBalancesResponse {
@@ -194,10 +247,20 @@ export interface LeaveRequestItem {
   decisionComment: string | null;
   decidedAt: string | null;
   createdAt: string;
+  /** True when the policy required no approval, so nobody decided it. */
+  autoApproved: boolean;
   employee: PersonRef & { workEmail: string };
   leaveType: { id: string; code: string; name: string; requiresBalance: boolean };
+  /** Audit only: who the request was routed to at submission. */
   approver: { id: string; firstName: string; lastName: string } | null;
   decidedBy: { id: string; firstName: string; lastName: string } | null;
+  /** Which policy version the request was judged against. */
+  appliedPolicy: {
+    id: string;
+    quotaDays: number;
+    effectiveFrom: string;
+    effectiveTo: string | null;
+  } | null;
 }
 
 export interface LeaveRequestsResponse {

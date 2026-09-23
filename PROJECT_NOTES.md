@@ -43,11 +43,15 @@ separate sessions. Favour clarity and explicit comments over cleverness.
 
 **Complete and verified end to end, backend and UI.**
 
-- Leave types, balances, requests, and the approval flow (14 tables now)
-- All six validation rules enforced and tested
-- Permission scoping respected throughout
-- Three screens: My leave, Request leave, Leave approvals — every button
-  clicked through in a browser, not just exercised through the API
+- Leave types, **effective-dated policies**, balances, requests, and the
+  approval flow (15 tables now)
+- **Leave policy is configuration, not code.** HR creates leave types and
+  changes quotas through the dashboard; changing a quota creates a new dated
+  version and the old one survives, so historical questions still resolve.
+- All validation rules enforced and tested, including minimum notice
+- Permission scoping respected throughout; policy admin is HR-only
+- Four screens: My leave, Request leave, Leave approvals, **Leave policy
+  settings** — every button clicked through in a browser
 
 ### Deliberately NOT built yet
 
@@ -672,34 +676,152 @@ When starting a new session on this project:
 
 ## 10. Leave Management (Phase 2, Module 1)
 
-### Three tables
+### Four tables
 
 | Table | Holds |
 | --- | --- |
-| `LeaveType` | Reference data — Annual, Sick, Unpaid. Admin-editable. |
-| `LeaveBalance` | One person's entitlement, for one type, for one year. |
+| `LeaveType` | **Identity only** — the name of a kind of leave. No rules. |
+| `LeaveTypePolicy` | **The rules, effective-dated.** Quota, notice, approval, carry-forward. |
+| `LeaveBalance` | Per-employee *exceptions* — an override, or carry-forward. |
 | `LeaveRequest` | A request and its decision. |
 
-### Decisions worth knowing
+### The central decision: leave policy is data, not code
 
-- **Only `entitledDays` is stored. Taken, pending, and remaining are derived**
-  by summing requests on every read. A stored "remaining" counter would be a
-  second source of truth that drifts the moment a request is cancelled or
-  back-dated. Cancelling a request frees its reserved days automatically,
-  because there is nothing to un-deduct.
-- **Pending requests reserve balance.** Otherwise someone could submit ten
-  requests for the same ten days and have them all pass validation.
-- **`LeaveRequest.days` is stored, not recomputed.** If the working-day rules
-  change later (a holiday calendar, a four-day week), an already-approved
-  request must keep the number it was approved with, or historical balances
-  silently change.
-- **`approverId` is a snapshot** taken at submission from the employee's open
-  `EmploymentAssignment`. If someone changes manager mid-request it stays with
-  the manager who was actually asked.
-- **Resolved from the assignment, not `Employee.managerId`.** The two agree, but
-  the assignment is the source of truth. Falls back to the department head when
-  someone has no manager, so a CEO's direct report is not stranded. A null
-  approver is still possible (the CEO's own request) — only HR can decide those.
+Nothing in application code knows that "Annual Leave" exists or that it is
+worth 8 days. HR creates leave types and changes quotas through
+**Leave policy settings**, and the system honours the change from the date they
+choose.
+
+Crucially, **changing a quota does not overwrite the old one**. It closes the
+current version and opens a new one, so the system can still answer *"what was
+the Annual Leave quota in March 2026?"* after the quota has been cut in July.
+
+### The effective-dated pattern (reusable)
+
+`LeaveTypePolicy` is the same pattern as `EmploymentAssignment`, applied to
+policy instead of people:
+
+| | `EmploymentAssignment` | `LeaveTypePolicy` |
+| --- | --- | --- |
+| Answers | What job did this person hold on date D? | What rules did this leave type have on date D? |
+| Keyed to | An employee | A leave type |
+| Current row | `effectiveTo IS NULL` | `effectiveTo IS NULL` |
+| Changing it | Close the open row, open a new one, in one transaction | Same |
+| Overlaps | Partial unique index | Exclusion constraint |
+
+**This pattern is reusable for any future HR policy area** — probation rules,
+notice periods, working-hours patterns, shift premiums. The recipe is:
+`effectiveFrom` + nullable `effectiveTo`, a database constraint forbidding
+overlap, a service that closes-and-opens in a transaction, and a
+`getXOn(entity, date)` lookup. Do not invent a competing mechanism.
+
+### How overlapping periods are prevented
+
+Two layers, and the database one is the real guarantee:
+
+1. **A Postgres exclusion constraint** (hand-written into the migration, since
+   Prisma cannot express one):
+
+   ```sql
+   CREATE EXTENSION IF NOT EXISTS btree_gist;
+   ALTER TABLE "leave_type_policies"
+     ADD CONSTRAINT "leave_type_policies_no_overlap"
+     EXCLUDE USING gist (
+       "leave_type_id" WITH =,
+       daterange("effective_from", "effective_to", '[]') WITH &&
+     );
+   ```
+
+   `daterange(..., '[]')` treats a NULL upper bound as unbounded, which is
+   exactly what `effectiveTo = NULL` means. Postgres normalises inclusive
+   discrete ranges to half-open, so Jan 1–Jun 30 and Jul 1–onwards sit flush
+   without overlapping. **Verified directly**: two adjacent periods insert; an
+   overlapping one is rejected.
+
+2. **A service check first**, purely so the user gets a readable message rather
+   than a raw constraint violation. The service also refuses a version starting
+   on or before the current one.
+
+### How historical lookup works
+
+`LeavePolicyService.getPolicyOn(leaveTypeId, date)` — the row where
+`effectiveFrom <= date AND (effectiveTo IS NULL OR effectiveTo >= date)`.
+
+Exposed as `GET /api/leave/types/:id/policy-on?date=2026-03-15`. Verified:
+
+| Date | Quota |
+| --- | --- |
+| 2026-03-15 | 8 |
+| 2026-06-30 | 8 |
+| 2026-07-01 | 6 |
+| 2026-08-15 | 6 |
+
+A request is judged against **the policy in force on its start date**, not
+today's policy, and the version used is recorded on
+`LeaveRequest.appliedPolicyId` as an audit trail.
+
+### How mid-year quota changes are calculated
+
+**Period-based prorating** (`ProrationMethod.PRORATED_BY_DAYS`, the default).
+Each policy period contributes in proportion to how much of the year it covers:
+
+```
+contribution = quotaDays × (days the policy covers in the year ÷ days in year)
+```
+
+Worked example, Annual Leave 2026 (365 days), quota cut from 8 to 6 on 1 July:
+
+| Period | Quota | Days | Contribution |
+| --- | --- | --- | --- |
+| Jan 1 – Jun 30 | 8 | 181 | 8 × 181/365 = **3.97** |
+| Jul 1 – Dec 31 | 6 | 184 | 6 × 184/365 = **3.02** |
+| | | | **6.99 days** |
+
+The alternative, `LATEST_POLICY_IN_YEAR`, applies the latest policy's quota to
+the whole year — a mid-year cut then reduces the year retroactively. It is
+**configurable per leave type** (`LeaveType.prorationMethod`) rather than
+hardcoded, because companies differ on this and it should not need a developer.
+
+Rounding is to two decimals on the total. The breakdown is returned to the UI
+and shown to both HR and the employee, so a fractional entitlement is never an
+unexplained number.
+
+### Leave balance calculation
+
+```
+entitled   = entitlementOverrideDays ?? calculateEntitlement(type, year)
+remaining  = entitled + carriedForward − used − pending
+```
+
+- **Entitlement is derived from policy**, not stored per employee. That is what
+  makes a past year immune to a present-day policy change.
+- **A `LeaveBalance` row exists only for exceptions** — an HR override, or
+  carried-forward days. No row means "policy applies as written", which is the
+  normal case. The seed creates no balance rows at all.
+- **Used, pending, and remaining are derived** by summing requests on every
+  read. A stored counter would drift the moment a request is cancelled or
+  back-dated. Cancelling frees the days automatically — there is nothing to
+  un-deduct.
+- **Pending requests reserve balance.** Otherwise ten requests for the same ten
+  days would each pass validation.
+- **`LeaveRequest.days` is stored, not recomputed.** If working-day rules change
+  later (a holiday calendar, a four-day week), an approved request must keep the
+  number it was approved with.
+
+### Approval flow
+
+- The approver is the employee's **current** manager, read live from the open
+  `EmploymentAssignment` on every check — so a manager change re-routes pending
+  requests immediately and nothing strands with someone who has left.
+- `LeaveRequest.approverId` records who was *originally* asked. That is **audit
+  only**; it does not decide who may approve.
+- Falls back to the department head when someone has no manager, so a CEO's
+  direct report is not stranded. A null approver is still possible (the CEO's
+  own request) — only HR can decide those.
+- **When the policy has `approvalRequired = false`**, the request is APPROVED on
+  submission and flagged `autoApproved`, with an explanatory comment. Kept
+  distinct from `decidedById = null` so a report can tell "no approval needed"
+  apart from "approved by someone since deleted".
 - **`requiresBalance` is per type**, which is how Unpaid leave can be taken with
   zero entitlement without hardcoding "Annual only" into the validation.
 - **`REJECTED` and `CANCELLED` are separate states.** One is a manager's
@@ -722,51 +844,96 @@ Rule 5 needs the **explicit self-check**, not just permissions: a manager holds
 `leave_request:approve` at TEAM scope, and TEAM includes themselves, so scope
 alone would let them approve their own leave. Verified directly.
 
+### Cancellation behaviour
+
+- **PENDING → CANCELLED** at any time by the employee.
+- **APPROVED → CANCELLED** only while the leave has **not yet started**. Once
+  it has begun it is a historical fact that someone was off; unwinding it is an
+  HR correction, not a self-service action.
+- **REJECTED cannot be cancelled** — it is already closed, by someone else's
+  decision.
+- Cancelling **restores the balance automatically**, because balances are
+  derived. Verified: 3.99 → 6.99 on cancelling a 3-day approved request.
+
 ### Permission scopes
 
-| AccessRole | read | approve | create |
-| --- | --- | --- | --- |
-| employee | SELF | *(none at all)* | SELF |
-| manager | TEAM | TEAM | SELF |
-| department_head | DEPARTMENT | DEPARTMENT | SELF |
-| hr_admin | GLOBAL | GLOBAL | GLOBAL |
+| AccessRole | request read | approve | create | policy read | policy manage |
+| --- | --- | --- | --- | --- | --- |
+| employee | SELF | *(none at all)* | SELF | — | — |
+| manager | TEAM | TEAM | SELF | — | — |
+| department_head | DEPARTMENT | DEPARTMENT | SELF | — | — |
+| hr_admin | GLOBAL | GLOBAL | GLOBAL | GLOBAL | GLOBAL |
 
-`create` is SELF even for managers, deliberately — it is what stops a manager
-raising and approving a request in one motion. HR's GLOBAL approve is what
-unblocks a request whose manager has left the company.
+- `create` is SELF even for managers, deliberately — it is what stops a manager
+  raising and approving a request in one motion. HR's GLOBAL approve unblocks a
+  request whose manager has left.
+- **`leave_policy:*` is granted to no one but HR** (and super_admin). A manager
+  gets 403 even reading policy history.
+- Approving your own request is blocked by an **explicit check**, not by
+  permissions: a manager holds approve at TEAM scope and TEAM includes
+  themselves.
 
-Verified: Zara sees 2 requests, Omar 3, Bilal 4, Sana 4; Omar gets a 404
-fetching Hassan's request by id.
+### Assumptions made during implementation
+
+Flagging these because the spec left them open:
+
+1. **Leave year = calendar year.** A company running April–March would need a
+   configurable year start; nothing depends on this beyond
+   `calculateEntitlement` and `leaveYearOf`.
+2. **Minimum notice is counted in calendar days**, not working days — "two
+   days' notice" is ordinarily read that way.
+3. **Proration is by policy period only, not by employment.** Someone joining in
+   August still gets the full year's entitlement. Use
+   `LeaveBalance.entitlementOverrideDays` for joiners until employment-based
+   proration is built.
+4. **Carry-forward is stored, not computed.** `carryForwardEnabled` and the cap
+   live on the policy, but the carried amount is set by HR per employee — an
+   automatic year-end roll-over job is not built.
+5. **The spec listed quota/notice/approval under both "Leave Type fields" and
+   "policy version fields".** They are implemented **only on the policy
+   version**, so they are always effective-dated; the type row carries identity
+   alone. The create-type form sets both at once, which is how Test A reads.
+6. **`LeaveRequest.approverId` is retained** despite the spec's preference
+   against a snapshot — but demoted to audit only. Authorisation and the
+   approvals queue resolve the current manager live.
 
 ### Verified in a browser
 
-Walked end to end on 2026-09-17, as three different people:
+**Phase 2 module 1 (2026-09-23), as HR and as an employee:**
 
-1. **Zara (employee)** submits 3 days at `/leave/new` → lands on `/leave` as
-   PENDING, routed to Omar, balance drops 15 → 12 immediately.
-2. **Omar (manager)** sees it at `/leave/approvals`, types a comment, clicks
-   **Approve** → queue empties, decision and comment recorded against his name.
-3. **Zara** clicks **Withdraw** on the approved future-dated request → status
-   becomes CANCELLED and the balance returns 12 → **15** on its own, because
-   balances are derived rather than stored. Nothing to un-deduct.
+1. **Test A — create leave type.** As Sana (HR), created *Bereavement Leave*,
+   quota 4, notice 0, approval required. Appeared in the list immediately with
+   its opening policy version.
+2. **Test B — mid-year change.** Created a second version for the same type:
+   6 days from 1 July 2026. The previous version auto-closed at 30 June and
+   **kept its 4 days**. Entitlement recalculated to 5.0 (1.98 + 3.02).
+   Also done on Annual Leave (8 → 6 from 1 July), giving 6.99.
+3. **Test C — historical lookup.** March → 8, 30 June → 8, 1 July → 6,
+   August → 6. Changing the current policy did not alter the March answer.
+4. **Test D — employee balance.** As Zara, Annual Leave shows **6.99 days** with
+   an expandable "Quota changed during 2026" breakdown.
+5. **Test I — permissions.** Zara has no **Leave policy** nav link, the page
+   renders "Not available", and a direct API call returns **403**.
 
-Permission gating confirmed in the UI too: Zara's navigation has no
-**Approvals** link, Omar's does.
+**Earlier (2026-09-17), the request lifecycle:** submit → approve with comment →
+withdraw, with balances moving correctly at each step.
 
 ### ⚠️ What is NOT built
 
-- **No admin UI for leave types or balances.** The endpoints exist
-  (`POST /api/leave/types`, `POST /api/leave/balances`) but there is no screen,
-  so entitlements can only be changed by the seed or a direct API call.
 - **No notifications.** A manager is not told a request is waiting; an employee
-  is not told of a decision. This is the most visible gap for real use.
+  is not told of a decision. The most visible gap for real use.
 - **No public holiday calendar.** Only weekends are excluded, so leave over Eid
   or Christmas currently consumes those days. `working-days.ts` is the only file
   that changes when this lands.
-- **No accrual.** A flat yearly entitlement set by HR. Real accrual (earned per
-  month, pro-rated for joiners and leavers, carry-over caps) belongs with
-  Payroll.
+- **No accrual, and no automatic carry-forward roll-over.** Entitlement is a
+  yearly figure from policy; earned-per-month accrual belongs with Payroll.
+- **No employment-based proration** for mid-year joiners and leavers — see
+  assumption 3.
+- **No admin UI for per-employee balance overrides.** `POST /api/leave/balances`
+  exists but has no screen, so an override needs a direct API call.
 - **No team leave calendar** — who is off when, which is what managers actually
   want before approving.
 - **Requests spanning New Year** are attributed entirely to the start date's
   year rather than split across two balances.
+- **No automated tests.** There is still no test runner in the project;
+  verification is the manual API and browser walkthroughs recorded above.

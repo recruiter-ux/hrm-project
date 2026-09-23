@@ -159,13 +159,34 @@ const PERMISSIONS: Array<{
     module: 'leave',
     description: 'Withdraw a leave request',
   },
+  {
+    resource: 'leave_policy',
+    action: 'read',
+    module: 'leave',
+    description: 'View leave policy versions and history',
+  },
+  {
+    resource: 'leave_policy',
+    action: 'manage',
+    module: 'leave',
+    description: 'Create leave types and effective-dated policy versions',
+  },
 ];
 
 // -----------------------------------------------------------------------------
-// 1b. LEAVE TYPES (Phase 2)
+// 1b. LEAVE TYPES + THEIR OPENING POLICY (Phase 2)
 //
-// UNPAID has requiresBalance: false — it is legitimate to take unpaid leave
-// without any entitlement, so the balance check is skipped for it.
+// These are STARTING data, not a fixed list. HR creates and archives leave
+// types through the admin UI — nothing in application code depends on these
+// codes existing.
+//
+// Each type gets one opening policy version effective 1 January. Further
+// versions are created through the UI, which is what preserves history when a
+// quota changes mid-year.
+//
+// Two deliberate demonstrations:
+//   UNPAID  requiresBalance: false   — legitimate to take with no entitlement
+//   UNPAID  approvalRequired: false  — auto-approves on submission
 // -----------------------------------------------------------------------------
 const LEAVE_TYPES: Array<{
   code: string;
@@ -173,7 +194,13 @@ const LEAVE_TYPES: Array<{
   description: string;
   isPaid: boolean;
   requiresBalance: boolean;
-  defaultAnnualDays: number;
+  policy: {
+    quotaDays: number;
+    approvalRequired: boolean;
+    carryForwardEnabled: boolean;
+    carryForwardMaxDays: number | null;
+    minNoticeDays: number;
+  };
 }> = [
   {
     code: 'ANNUAL',
@@ -181,7 +208,13 @@ const LEAVE_TYPES: Array<{
     description: 'Paid holiday entitlement.',
     isPaid: true,
     requiresBalance: true,
-    defaultAnnualDays: 20,
+    policy: {
+      quotaDays: 8,
+      approvalRequired: true,
+      carryForwardEnabled: false,
+      carryForwardMaxDays: null,
+      minNoticeDays: 2,
+    },
   },
   {
     code: 'SICK',
@@ -189,15 +222,42 @@ const LEAVE_TYPES: Array<{
     description: 'Paid time off for illness. A medical note may be requested.',
     isPaid: true,
     requiresBalance: true,
-    defaultAnnualDays: 10,
+    policy: {
+      // No notice period: you cannot give two days' warning of falling ill.
+      quotaDays: 10,
+      approvalRequired: true,
+      carryForwardEnabled: false,
+      carryForwardMaxDays: null,
+      minNoticeDays: 0,
+    },
+  },
+  {
+    code: 'CASUAL',
+    name: 'Casual Leave',
+    description: 'Short-notice personal time off.',
+    isPaid: true,
+    requiresBalance: true,
+    policy: {
+      quotaDays: 5,
+      approvalRequired: true,
+      carryForwardEnabled: true,
+      carryForwardMaxDays: 2,
+      minNoticeDays: 1,
+    },
   },
   {
     code: 'UNPAID',
     name: 'Unpaid Leave',
-    description: 'Time off without pay. Requires no entitlement.',
+    description: 'Time off without pay. Requires no entitlement and no approval.',
     isPaid: false,
     requiresBalance: false,
-    defaultAnnualDays: 0,
+    policy: {
+      quotaDays: 0,
+      approvalRequired: false,
+      carryForwardEnabled: false,
+      carryForwardMaxDays: null,
+      minNoticeDays: 0,
+    },
   },
 ];
 
@@ -252,6 +312,10 @@ const ACCESS_ROLES: Array<{
       { permission: 'leave_request:create', scope: PermissionScope.GLOBAL },
       { permission: 'leave_request:approve', scope: PermissionScope.GLOBAL },
       { permission: 'leave_request:cancel', scope: PermissionScope.GLOBAL },
+      // Policy administration is HR-only. No manager or employee AccessRole
+      // grants leave_policy:manage at any scope.
+      { permission: 'leave_policy:read', scope: PermissionScope.GLOBAL },
+      { permission: 'leave_policy:manage', scope: PermissionScope.GLOBAL },
     ],
   },
   {
@@ -871,56 +935,61 @@ async function main(): Promise<void> {
     });
   }
 
-  // --- Leave types + starting balances (Phase 2) -----------------------------
+  // --- Leave types + their opening policy version (Phase 2) ------------------
+  //
+  // NOTE: no per-employee balance rows are seeded. Entitlement is DERIVED from
+  // the effective-dated policy, so everyone automatically has the right number
+  // without a row per person. A LeaveBalance row is created only when someone
+  // needs an exception (an override, or carry-forward).
+  const leaveYear = new Date().getUTCFullYear();
+  const policyStart = new Date(Date.UTC(leaveYear, 0, 1));
+
   for (const type of LEAVE_TYPES) {
-    await prisma.leaveType.upsert({
+    const leaveType = await prisma.leaveType.upsert({
       where: { code: type.code },
       update: {
         name: type.name,
         description: type.description,
         isPaid: type.isPaid,
         requiresBalance: type.requiresBalance,
-        defaultAnnualDays: type.defaultAnnualDays,
       },
-      create: type,
-    });
-  }
-  console.log(`  Leave types  : ${LEAVE_TYPES.length}`);
-
-  // Give everyone this year's default entitlement for each type that needs one.
-  // Real accrual (earned per month, pro-rated, carried over) comes with
-  // Payroll — this phase is a flat yearly allocation set by HR.
-  const leaveYear = new Date().getUTCFullYear();
-  let balanceCount = 0;
-
-  for (const emp of EMPLOYEES) {
-    const employee = await prisma.employee.findUniqueOrThrow({
-      where: { employeeNumber: emp.employeeNumber },
+      create: {
+        code: type.code,
+        name: type.name,
+        description: type.description,
+        isPaid: type.isPaid,
+        requiresBalance: type.requiresBalance,
+      },
     });
 
-    for (const type of LEAVE_TYPES.filter((t) => t.requiresBalance)) {
-      const leaveType = await prisma.leaveType.findUniqueOrThrow({ where: { code: type.code } });
-
-      await prisma.leaveBalance.upsert({
-        where: {
-          employeeId_leaveTypeId_year: {
-            employeeId: employee.id,
-            leaveTypeId: leaveType.id,
-            year: leaveYear,
-          },
-        },
-        update: { entitledDays: type.defaultAnnualDays },
-        create: {
-          employeeId: employee.id,
-          leaveTypeId: leaveType.id,
-          year: leaveYear,
-          entitledDays: type.defaultAnnualDays,
-        },
-      });
-      balanceCount += 1;
-    }
+    // Keyed on (leaveTypeId, effectiveFrom) so re-running the seed updates the
+    // opening version rather than stacking duplicates — and leaves any extra
+    // versions HR has created through the UI untouched.
+    await prisma.leaveTypePolicy.upsert({
+      where: {
+        leaveTypeId_effectiveFrom: { leaveTypeId: leaveType.id, effectiveFrom: policyStart },
+      },
+      update: {
+        quotaDays: type.policy.quotaDays,
+        approvalRequired: type.policy.approvalRequired,
+        carryForwardEnabled: type.policy.carryForwardEnabled,
+        carryForwardMaxDays: type.policy.carryForwardMaxDays,
+        minNoticeDays: type.policy.minNoticeDays,
+      },
+      create: {
+        leaveTypeId: leaveType.id,
+        quotaDays: type.policy.quotaDays,
+        approvalRequired: type.policy.approvalRequired,
+        carryForwardEnabled: type.policy.carryForwardEnabled,
+        carryForwardMaxDays: type.policy.carryForwardMaxDays,
+        minNoticeDays: type.policy.minNoticeDays,
+        effectiveFrom: policyStart,
+        effectiveTo: null,
+        notes: `Initial ${leaveYear} policy, created by seed.`,
+      },
+    });
   }
-  console.log(`  Leave balances: ${balanceCount} (${leaveYear})`);
+  console.log(`  Leave types  : ${LEAVE_TYPES.length} (each with an opening policy version)`);
 
   // --- Login accounts --------------------------------------------------------
   // Everyone in EMPLOYEES gets an account with the same development password,

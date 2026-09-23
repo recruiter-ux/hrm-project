@@ -110,18 +110,40 @@ export default function MyLeavePage() {
                     <div className="text-xs text-[var(--muted)]">days remaining</div>
                     <dl className="mt-3 space-y-0.5 text-xs text-[var(--muted)]">
                       <div className="flex justify-between">
-                        <dt>Entitled</dt>
+                        <dt>Entitled{b.isOverridden && ' (set by HR)'}</dt>
                         <dd>{b.entitledDays}</dd>
                       </div>
+                      {b.carriedForwardDays > 0 && (
+                        <div className="flex justify-between">
+                          <dt>Carried forward</dt>
+                          <dd>{b.carriedForwardDays}</dd>
+                        </div>
+                      )}
                       <div className="flex justify-between">
-                        <dt>Taken (approved)</dt>
-                        <dd>{b.approvedDays}</dd>
+                        <dt>Used (approved)</dt>
+                        <dd>{b.usedDays}</dd>
                       </div>
                       <div className="flex justify-between">
                         <dt>Reserved (pending)</dt>
                         <dd>{b.pendingDays}</dd>
                       </div>
                     </dl>
+                    {/* Shows HR's mid-year quota change in the employee's own
+                        terms, rather than an unexplained fractional number. */}
+                    {b.entitlementBreakdown.length > 1 && (
+                      <details className="mt-2 text-xs text-[var(--muted)]">
+                        <summary className="cursor-pointer">
+                          Quota changed during {b.year}
+                        </summary>
+                        <ul className="mt-1 space-y-0.5">
+                          {b.entitlementBreakdown.map((row) => (
+                            <li key={row.policyId}>
+                              {row.from} to {row.to}: {row.quotaDays} days/yr → {row.contribution}
+                            </li>
+                          ))}
+                        </ul>
+                      </details>
+                    )}
                   </>
                 ) : (
                   <p className="mt-2 text-sm text-[var(--muted)]">
