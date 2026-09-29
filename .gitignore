@@ -48,3 +48,10 @@ desktop.ini
 # Local uploads (documents are stored in object storage in real environments —
 # this folder is only a placeholder for local development)
 uploads/
+
+# Emails written to disk by EMAIL_TRANSPORT=file. Real messages addressed to
+# real people — never commit them. `test-outbox/` and `ci-outbox/` are the
+# throwaway equivalents the automated tests and CI write to.
+outbox/
+test-outbox/
+ci-outbox/

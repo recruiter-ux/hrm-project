@@ -25,6 +25,9 @@
       "@/*": ["src/*"]
     }
   },
-  "include": ["src/**/*", "prisma/**/*"],
+  // `test/**/*` is here so `npm run typecheck` covers the test suite too — a
+  // test that no longer compiles is a broken test. tsconfig.build.json
+  // excludes it again so nothing from test/ is ever shipped in dist/.
+  "include": ["src/**/*", "prisma/**/*", "test/**/*"],
   "exclude": ["node_modules", "dist"]
 }

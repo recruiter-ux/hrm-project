@@ -39,4 +39,44 @@ export default () => ({
     uploadDir: process.env.UPLOAD_DIR ?? './uploads',
     maxUploadBytes: parseInt(process.env.MAX_UPLOAD_BYTES ?? '10485760', 10),
   },
+
+  /**
+   * Where the web app lives. Notification emails contain absolute links back
+   * into Velixa HR, and an email cannot use a relative one.
+   */
+  app: {
+    webUrl: process.env.WEB_APP_URL ?? 'http://localhost:3000',
+  },
+
+  /**
+   * Email delivery. See apps/api/src/notifications/email/email.service.ts.
+   *
+   * The default is deliberately different per environment:
+   *   development — `file`, writing openable .eml files to EMAIL_OUTBOX_DIR,
+   *                 so notification emails can be verified without a provider
+   *   production  — `none`, so a deployment that forgot to configure SMTP
+   *                 records SKIPPED deliveries rather than silently writing
+   *                 mail to a directory nobody reads
+   */
+  email: {
+    transport: (process.env.EMAIL_TRANSPORT ??
+      (process.env.NODE_ENV === 'production' ? 'none' : 'file')) as 'file' | 'smtp' | 'none',
+    from: process.env.EMAIL_FROM ?? 'Velixa HR <no-reply@velixa-hr.local>',
+    outboxDir: process.env.EMAIL_OUTBOX_DIR ?? './outbox',
+    smtp: {
+      host: process.env.SMTP_HOST ?? '',
+      port: parseInt(process.env.SMTP_PORT ?? '587', 10),
+      secure: process.env.SMTP_SECURE === 'true',
+      user: process.env.SMTP_USER ?? '',
+      password: process.env.SMTP_PASSWORD ?? '',
+    },
+  },
+
+  notifications: {
+    /** How often the outbox dispatcher looks for work. 0 disables the timer. */
+    dispatchIntervalMs: parseInt(process.env.NOTIFICATION_DISPATCH_INTERVAL_MS ?? '15000', 10),
+    /** Give up after this many tries and mark the delivery FAILED. */
+    maxAttempts: parseInt(process.env.NOTIFICATION_MAX_ATTEMPTS ?? '5', 10),
+    batchSize: parseInt(process.env.NOTIFICATION_BATCH_SIZE ?? '25', 10),
+  },
 });

@@ -30,11 +30,13 @@ export class UpdateEmployeeDto {
   @IsOptional() @IsString() @MinLength(1) @MaxLength(100) lastName?: string;
   @IsOptional() @IsString() @MaxLength(100) preferredName?: string;
 
-  @IsOptional() @IsEmail({}, { message: 'workEmail must be a valid email address.' })
+  @IsOptional()
+  @IsEmail({}, { message: 'workEmail must be a valid email address.' })
   @MaxLength(255)
   workEmail?: string;
 
-  @IsOptional() @IsEmail({}, { message: 'personalEmail must be a valid email address.' })
+  @IsOptional()
+  @IsEmail({}, { message: 'personalEmail must be a valid email address.' })
   @MaxLength(255)
   personalEmail?: string;
 

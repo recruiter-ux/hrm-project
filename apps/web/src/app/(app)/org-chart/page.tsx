@@ -55,7 +55,8 @@ function Node({ node, depth }: { node: OrgChartNode; depth: number }) {
             {node.title ?? 'No job title'}
             {node.department && ` · ${node.department}`}
             {node.workLocationType === 'REMOTE' && ' · remote'}
-            {hasChildren && ` · ${node.children.length} report${node.children.length === 1 ? '' : 's'}`}
+            {hasChildren &&
+              ` · ${node.children.length} report${node.children.length === 1 ? '' : 's'}`}
           </div>
         </div>
       </div>

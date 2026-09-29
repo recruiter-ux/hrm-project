@@ -7,11 +7,13 @@
 > **Keep it current.** When a decision changes, edit this file in the same
 > commit as the code change.
 
-**Last updated:** Phase 1 — authentication, permissions, employee management
-**Company:** Hazel Mobile (AI and mobility apps studio)
-**Product:** Velixa HR — internal HR platform
-**Directed by:** a non-developer product owner, module by module, across many
-separate sessions. Favour clarity and explicit comments over cleverness.
+**Last updated:** 2026-09-29 — Leave Management completed: notifications (in-app
+
+- email), audit log, concurrency protection, and the first automated test suite
+  **Company:** Hazel Mobile (AI and mobility apps studio)
+  **Product:** Velixa HR — internal HR platform
+  **Directed by:** a non-developer product owner, module by module, across many
+  separate sessions. Favour clarity and explicit comments over cleverness.
 
 ---
 
@@ -41,17 +43,33 @@ separate sessions. Favour clarity and explicit comments over cleverness.
 
 ### Built (Phase 2, Module 1 — Leave Management)
 
-**Complete and verified end to end, backend and UI.**
+**Complete and verified end to end, backend and UI, with automated tests.**
 
 - Leave types, **effective-dated policies**, balances, requests, and the
-  approval flow (15 tables now)
+  approval flow
 - **Leave policy is configuration, not code.** HR creates leave types and
   changes quotas through the dashboard; changing a quota creates a new dated
   version and the old one survives, so historical questions still resolve.
-- All validation rules enforced and tested, including minimum notice
+- All validation rules enforced, including minimum notice
 - Permission scoping respected throughout; policy admin is HR-only
-- Four screens: My leave, Request leave, Leave approvals, **Leave policy
-  settings** — every button clicked through in a browser
+- **Concurrency protection** — two simultaneous requests cannot spend the same
+  days (§10)
+- Five screens: My leave, Request leave, Leave approvals, **Leave policy
+  settings**, and the **notification centre** in the header
+
+### Built (Phase 2 — platform services, shared by every future module)
+
+These were built alongside Leave but belong to no module. **Reuse them; do not
+write a second one.** 18 tables now.
+
+- **Notifications** — in-app bell plus email, one call per event, idempotent,
+  with a database-backed outbox. See §11.
+- **Email** — a transport abstraction (`file` / `smtp` / `none`) and reusable
+  branded templates. See §11.
+- **Audit log** — one generic `audit_logs` table; every module writes to it.
+  See §13.
+- **Automated tests** — Jest, 132 tests, unit plus integration against a real
+  Postgres, wired into CI. See §12.
 
 ### Deliberately NOT built yet
 
@@ -60,12 +78,12 @@ Do not add these without being asked — they are scheduled for later phases.
 - **User account provisioning.** Creating an employee does NOT create a login.
   There is no invite email, no self-service password reset, and no admin UI for
   granting AccessRoles. Accounts currently come from the seed script only. This
-  is the most obvious gap — see §8.
+  is the most obvious gap — see §8. (The email infrastructure it needs now
+  exists — see §11.)
 - **Department and Role (job title) admin screens.** Both are seeded; neither
   can be edited in the UI.
-- **Every other module:** Recruitment/ATS, Attendance & Shifts, Leave,
-  Dashboards, Notifications, Reporting, Payroll, Performance, AI features.
-- **Tests.** No test runner is installed. Add Jest with the first real feature.
+- **Every other module:** Recruitment/ATS, Attendance & Shifts, Dashboards,
+  Reporting, Payroll, Performance, AI features.
 
 ### Planned module order (MVP)
 
@@ -77,17 +95,17 @@ Later: Payroll, Performance Management, AI features.
 
 ## 2. Stack and why
 
-| Choice | Version | Reasoning |
-| --- | --- | --- |
-| Node.js | 24 LTS | Active LTS line, supported to April 2028. Pinned in `.nvmrc` and CI. |
-| npm workspaces | npm 10+ | Explicitly chosen over Turborepo/Nx. One tool, no extra config, no build-graph concepts to learn. Revisit only if builds get slow. |
-| NestJS | 11.x | Opinionated structure (modules/controllers/services). The rigidity is the point when many separate sessions touch the code. |
-| Next.js | 15.x, App Router | React 19, server components available when needed. |
-| PostgreSQL | 17 | Relational integrity matters for HR data. |
-| Prisma | 6.x | Schema file doubles as readable documentation; migrations are generated and reviewable. |
-| Redis | 7 | Not used yet. Present so local matches production later. |
-| Tailwind CSS | 4.x | Included now so the UI phase does not need a styling retrofit. |
-| TypeScript | 5.x, strict | `strict: true` in both apps. Do not weaken it. |
+| Choice         | Version          | Reasoning                                                                                                                          |
+| -------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Node.js        | 24 LTS           | Active LTS line, supported to April 2028. Pinned in `.nvmrc` and CI.                                                               |
+| npm workspaces | npm 10+          | Explicitly chosen over Turborepo/Nx. One tool, no extra config, no build-graph concepts to learn. Revisit only if builds get slow. |
+| NestJS         | 11.x             | Opinionated structure (modules/controllers/services). The rigidity is the point when many separate sessions touch the code.        |
+| Next.js        | 15.x, App Router | React 19, server components available when needed.                                                                                 |
+| PostgreSQL     | 17               | Relational integrity matters for HR data.                                                                                          |
+| Prisma         | 6.x              | Schema file doubles as readable documentation; migrations are generated and reviewable.                                            |
+| Redis          | 7                | Not used yet. Present so local matches production later.                                                                           |
+| Tailwind CSS   | 4.x              | Included now so the UI phase does not need a styling retrofit.                                                                     |
+| TypeScript     | 5.x, strict      | `strict: true` in both apps. Do not weaken it.                                                                                     |
 
 ---
 
@@ -113,7 +131,11 @@ Velixa HR/
 │   │       ├── assignments/    EmploymentAssignmentService — job changes
 │   │       ├── employees/      Employee CRUD + org chart
 │   │       ├── documents/      Upload / download / archive
+│   │       ├── leave/          Leave types, policies, balances, requests
+│   │       ├── notifications/  Bell + email outbox (global) — see §11
+│   │       ├── audit/          AuditService (global) — see §13
 │   │       └── health/         GET /health
+│   │   └── test/               Integration tests + fixtures — see §12
 │   └── web/                    Next.js frontend
 │       └── src/
 │           ├── app/
@@ -150,10 +172,10 @@ Nine tables. Two are join tables that exist only to connect the others.
 > **The one thing to get straight before reading on.** Two words sound alike
 > and mean completely different things:
 >
-> | Table | Means | Example |
-> | --- | --- | --- |
-> | `Role` | A **job title** — what someone is employed to do | "Software Engineer", "Recruiter" |
-> | `AccessRole` | A **permission set** — what someone may do in this software | "HR Administrator", "Manager" |
+> | Table        | Means                                                       | Example                          |
+> | ------------ | ----------------------------------------------------------- | -------------------------------- |
+> | `Role`       | A **job title** — what someone is employed to do            | "Software Engineer", "Recruiter" |
+> | `AccessRole` | A **permission set** — what someone may do in this software | "HR Administrator", "Manager"    |
 >
 > They are separate tables because they change independently. Promoting an
 > engineer to Senior must not silently grant them access to salary data, and
@@ -185,7 +207,7 @@ Key points:
 
 > ⚠️ **Five fields on `Employee` are a cache, not the source of truth.**
 > `roleId`, `departmentId`, `managerId`, `employmentType` and
-> `workLocationType` describe *today only*. The real record is
+> `workLocationType` describe _today only_. The real record is
 > `EmploymentAssignment` — see below. Never write these five from anywhere
 > except the one service method that also writes an assignment row.
 
@@ -217,7 +239,7 @@ How it works:
   reports must exclude it.
 - **Employment terms live here too** (`employmentType`, `workLocationType`),
   because an intern converting to full-time is a career event Payroll must see.
-- **`status` deliberately does *not* live here.** It flips often (every leave of
+- **`status` deliberately does _not_ live here.** It flips often (every leave of
   absence), and would drown the genuine job changes in noise.
 
 > ⚠️ **One database rule Prisma cannot express.** Prisma has no syntax for a
@@ -230,7 +252,7 @@ How it works:
 >    quoted in `schema.prisma` above the model
 > 3. `npm run prisma:migrate` (applies the edited file)
 >
-> A plain `migrate dev` writes *and* applies in one step, leaving nothing to
+> A plain `migrate dev` writes _and_ applies in one step, leaving nothing to
 > edit. Without the index, a bug can leave someone with two current jobs and
 > every headcount report silently double-counts them.
 
@@ -283,7 +305,7 @@ Employee ──(EmployeeAccessRole)──> AccessRole ──(AccessRolePermissio
 `AccessRolePermission` carries a `scope` column — `SELF`, `TEAM`,
 `DEPARTMENT`, or `GLOBAL`.
 
-Plain English: *"can read employees"* is not one permission, it is four. HR
+Plain English: _"can read employees"_ is not one permission, it is four. HR
 reads everyone. A department head reads their department. A manager reads their
 direct reports. An employee reads only themselves.
 
@@ -408,13 +430,12 @@ drown the career history in noise. If "how long was this person on leave last
 year?" becomes a real question, derive it from the Leave module rather than
 adding status rows to `EmploymentAssignment`.
 
-### No audit log
+### ✅ Resolved in Phase 2
 
-`EmploymentAssignment.recordedById` and `EmployeeAccessRole.grantedById` cover
-the two most sensitive changes, but there is still no general log of who edited
-what. Add a generic `AuditLog` table (`actorId`, `entityType`, `entityId`,
-`action`, `before`, `after`, `at`) — now feasible, since there is finally an
-authenticated actor to record.
+- **There is an audit log.** The generic `AuditLog` table flagged here is
+  built, and the Leave module writes to it. See §13.
+- **There are automated tests.** See §12.
+- **There is a notification and email system.** See §11.
 
 ### Open security items
 
@@ -446,7 +467,9 @@ rather than paying the complexity cost now for a maybe.
 
 - Hosting/deployment target (nothing in CI deploys)
 - Object storage provider for documents
-- Email/notification provider
+- **Email provider.** The architecture, templates, retries and configuration
+  all exist (§11); no SMTP provider has been chosen, so `EMAIL_TRANSPORT=file`
+  in development and `none` would apply in production until one is.
 - Whether the web app talks to NestJS directly or through Next.js route handlers
 
 ---
@@ -462,11 +485,11 @@ rediscover it.
 
 Because "Velixa HR" is not a legal identifier everywhere a name is needed:
 
-| Form | Where | Constraint |
-| --- | --- | --- |
-| `Velixa HR` | Prose, UI text, page titles, code comments | Human-readable |
-| `velixa-hr` | npm package name and scope, Docker project/container/volume names | Lowercase, no spaces |
-| `velixa_hr` | Postgres database name (`velixa_hr_dev`) | Postgres identifier rules |
+| Form        | Where                                                             | Constraint                |
+| ----------- | ----------------------------------------------------------------- | ------------------------- |
+| `Velixa HR` | Prose, UI text, page titles, code comments                        | Human-readable            |
+| `velixa-hr` | npm package name and scope, Docker project/container/volume names | Lowercase, no spaces      |
+| `velixa_hr` | Postgres database name (`velixa_hr_dev`)                          | Postgres identifier rules |
 
 To find every occurrence:
 
@@ -476,13 +499,13 @@ git grep -n -e "Velixa HR" -e "velixa-hr" -e "velixa_hr"
 
 ### What each form controls
 
-| Location | Value | Notes |
-| --- | --- | --- |
-| Root `package.json` | `"name": "velixa-hr"` | Must stay lowercase, no spaces |
-| All three `package.json` | `@velixa-hr/api`, `@velixa-hr/web` | The npm **scope**. Root scripts reference it (`-w @velixa-hr/api`) — these must change together or `npm run dev` breaks. Re-run `npm install` afterwards so the workspace symlinks and lockfile are rebuilt. |
-| `.env` / `.env.example` | `POSTGRES_DB=velixa_hr_dev` | Changing it requires recreating the database |
-| `.env` / `.env.example` | `DATABASE_URL` | Repeats the database name — must match `POSTGRES_DB` or nothing connects |
-| `docker-compose.yml` | `name:`, `container_name:`, volume `name:` | Renaming a volume **orphans the old one**: Docker silently creates a fresh empty volume and the old data becomes invisible while still consuming disk. Always `npm run db:nuke` *before* changing volume names. |
+| Location                 | Value                                      | Notes                                                                                                                                                                                                           |
+| ------------------------ | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Root `package.json`      | `"name": "velixa-hr"`                      | Must stay lowercase, no spaces                                                                                                                                                                                  |
+| All three `package.json` | `@velixa-hr/api`, `@velixa-hr/web`         | The npm **scope**. Root scripts reference it (`-w @velixa-hr/api`) — these must change together or `npm run dev` breaks. Re-run `npm install` afterwards so the workspace symlinks and lockfile are rebuilt.    |
+| `.env` / `.env.example`  | `POSTGRES_DB=velixa_hr_dev`                | Changing it requires recreating the database                                                                                                                                                                    |
+| `.env` / `.env.example`  | `DATABASE_URL`                             | Repeats the database name — must match `POSTGRES_DB` or nothing connects                                                                                                                                        |
+| `docker-compose.yml`     | `name:`, `container_name:`, volume `name:` | Renaming a volume **orphans the old one**: Docker silently creates a fresh empty volume and the old data becomes invisible while still consuming disk. Always `npm run db:nuke` _before_ changing volume names. |
 
 ### If the name ever changes again
 
@@ -560,12 +583,12 @@ match the product name, rename the GitHub repo in its settings and then
 Two guards, both registered globally in `AppModule`, so **every endpoint is
 protected by default**:
 
-| Guard | Question | Opt out with |
-| --- | --- | --- |
-| `JwtAuthGuard` | Who are you? | `@Public()` |
+| Guard              | Question         | Opt out with                             |
+| ------------------ | ---------------- | ---------------------------------------- |
+| `JwtAuthGuard`     | Who are you?     | `@Public()`                              |
 | `PermissionsGuard` | May you do this? | (only acts on `@RequirePermission(...)`) |
 
-Forgetting a decorator therefore *locks an endpoint down* rather than exposing
+Forgetting a decorator therefore _locks an endpoint down_ rather than exposing
 it — the safe direction to fail.
 
 **Permissions are loaded fresh from the database on each request, not baked
@@ -573,7 +596,7 @@ into the token.** That costs one indexed query and buys immediate revocation:
 remove someone from the `hr_admin` AccessRole and they lose access on their
 next request, not 15 minutes later.
 
-**The guard decides *whether*; the service decides *which rows*.**
+**The guard decides _whether_; the service decides _which rows_.**
 `PermissionsGuard` resolves the caller's scope and attaches it to the request;
 `PermissionsService.buildEmployeeScopeFilter()` turns that scope into a Prisma
 `where` fragment, which is ANDed with the user's own filters. There is no way
@@ -581,12 +604,12 @@ to widen visibility through a crafted query string.
 
 Verified behaviour with the seed data:
 
-| Account | AccessRole | Scope | Sees |
-| --- | --- | --- | --- |
-| sana.iqbal | hr_admin | GLOBAL | all 7 |
-| bilal.khan | department_head | DEPARTMENT | 4 (Engineering + nested teams) |
-| omar.farooq | manager | TEAM | 2 (self + direct reports) |
-| zara.ahmed | employee | SELF | 1 (self) |
+| Account     | AccessRole      | Scope      | Sees                           |
+| ----------- | --------------- | ---------- | ------------------------------ |
+| sana.iqbal  | hr_admin        | GLOBAL     | all 7                          |
+| bilal.khan  | department_head | DEPARTMENT | 4 (Engineering + nested teams) |
+| omar.farooq | manager         | TEAM       | 2 (self + direct reports)      |
+| zara.ahmed  | employee        | SELF       | 1 (self)                       |
 
 **TEAM is one level deep by design** — a manager sees their own reports, not
 their reports' reports. Skip-level visibility is what DEPARTMENT is for. If
@@ -638,7 +661,7 @@ answer more slowly.
 
 That is only safe because the cache is now trustworthy — see the three layers
 above. A **historical** org chart ("show me the org last March") is a different
-feature and *would* have to query assignments with a date filter. Worth
+feature and _would_ have to query assignments with a date filter. Worth
 building when Reporting lands.
 
 ### A bug worth remembering
@@ -660,11 +683,16 @@ When starting a new session on this project:
 
 1. Read this file and `README.md`.
 2. `npm run db:up` — start Postgres and Redis.
-3. `npm run dev` — start both apps.
-4. Open <http://localhost:3000> and sign in as `sana.iqbal@hazelmobile.com`
+3. `npm test` — 132 tests. If they pass, the stack is wired up correctly.
+4. `npm run dev` — start both apps.
+5. Open <http://localhost:3000> and sign in as `sana.iqbal@hazelmobile.com`
    (password `Password123!`).
-5. Confirm which module is being built, and check §6 for anything that must be
+6. Confirm which module is being built, and check §6 for anything that must be
    settled first.
+
+Before building anything that needs to tell someone something, read §11 — the
+notification and email system is already there and is meant to be reused.
+Before adding a "who changed this" table, read §13.
 
 > ⚠️ **Never run `npm run build` while `npm run dev` is running.** Both write to
 > `apps/web/.next`, and the production build clobbers the dev server's chunks —
@@ -678,36 +706,60 @@ When starting a new session on this project:
 
 ### Four tables
 
-| Table | Holds |
-| --- | --- |
-| `LeaveType` | **Identity only** — the name of a kind of leave. No rules. |
+| Table             | Holds                                                                   |
+| ----------------- | ----------------------------------------------------------------------- |
+| `LeaveType`       | **Identity only** — the name of a kind of leave. No rules.              |
 | `LeaveTypePolicy` | **The rules, effective-dated.** Quota, notice, approval, carry-forward. |
-| `LeaveBalance` | Per-employee *exceptions* — an override, or carry-forward. |
-| `LeaveRequest` | A request and its decision. |
+| `LeaveBalance`    | Per-employee _exceptions_ — an override, or carry-forward.              |
+| `LeaveRequest`    | A request and its decision.                                             |
+
+### The company's leave structure
+
+Confirmed by leadership on 2026-09-29:
+
+| Leave type   | Quota      | Notice | Approval      | Draws on a balance? |
+| ------------ | ---------- | ------ | ------------- | ------------------- |
+| Casual Leave | **8 days** | 1 day  | required      | yes                 |
+| Sick Leave   | **6 days** | none   | required      | yes                 |
+| Annual Leave | **6 days** | 2 days | required      | yes                 |
+| Unpaid Leave | **none**   | none   | auto-approves | **no**              |
+
+⚠️ **These are DATA, not constants.** No code anywhere reads them. They appear
+in exactly two places: `prisma/seed-data.ts`, which creates the opening policy
+version of a _brand-new_ database, and the `leave_type_policies` table itself.
+Editing the seed has no effect on a database that has already been seeded —
+HR changes a quota through **Leave policy settings**, which opens a new dated
+version.
+
+> **Why the 2026 numbers on screen are not exactly 8 / 6 / 6.** The quotas were
+> changed part-way through 2026, so 2026 is prorated across both periods (Casual
+> shows 5.77, Sick 8.97, Annual 6.99). That is the effective-dating working as
+> designed, and the breakdown is shown on screen. **2027 will be exactly 8 / 6 /
+> 6**, because one policy will cover the whole year.
 
 ### The central decision: leave policy is data, not code
 
 Nothing in application code knows that "Annual Leave" exists or that it is
-worth 8 days. HR creates leave types and changes quotas through
+worth 6 days. HR creates leave types and changes quotas through
 **Leave policy settings**, and the system honours the change from the date they
 choose.
 
 Crucially, **changing a quota does not overwrite the old one**. It closes the
-current version and opens a new one, so the system can still answer *"what was
-the Annual Leave quota in March 2026?"* after the quota has been cut in July.
+current version and opens a new one, so the system can still answer _"what was
+the Annual Leave quota in March 2026?"_ after the quota has been cut in July.
 
 ### The effective-dated pattern (reusable)
 
 `LeaveTypePolicy` is the same pattern as `EmploymentAssignment`, applied to
 policy instead of people:
 
-| | `EmploymentAssignment` | `LeaveTypePolicy` |
-| --- | --- | --- |
-| Answers | What job did this person hold on date D? | What rules did this leave type have on date D? |
-| Keyed to | An employee | A leave type |
-| Current row | `effectiveTo IS NULL` | `effectiveTo IS NULL` |
-| Changing it | Close the open row, open a new one, in one transaction | Same |
-| Overlaps | Partial unique index | Exclusion constraint |
+|             | `EmploymentAssignment`                                 | `LeaveTypePolicy`                              |
+| ----------- | ------------------------------------------------------ | ---------------------------------------------- |
+| Answers     | What job did this person hold on date D?               | What rules did this leave type have on date D? |
+| Keyed to    | An employee                                            | A leave type                                   |
+| Current row | `effectiveTo IS NULL`                                  | `effectiveTo IS NULL`                          |
+| Changing it | Close the open row, open a new one, in one transaction | Same                                           |
+| Overlaps    | Partial unique index                                   | Exclusion constraint                           |
 
 **This pattern is reusable for any future HR policy area** — probation rules,
 notice periods, working-hours patterns, shift premiums. The recipe is:
@@ -749,12 +801,12 @@ Two layers, and the database one is the real guarantee:
 
 Exposed as `GET /api/leave/types/:id/policy-on?date=2026-03-15`. Verified:
 
-| Date | Quota |
-| --- | --- |
-| 2026-03-15 | 8 |
-| 2026-06-30 | 8 |
-| 2026-07-01 | 6 |
-| 2026-08-15 | 6 |
+| Date       | Quota |
+| ---------- | ----- |
+| 2026-03-15 | 8     |
+| 2026-06-30 | 8     |
+| 2026-07-01 | 6     |
+| 2026-08-15 | 6     |
 
 A request is judged against **the policy in force on its start date**, not
 today's policy, and the version used is recorded on
@@ -771,11 +823,11 @@ contribution = quotaDays × (days the policy covers in the year ÷ days in year)
 
 Worked example, Annual Leave 2026 (365 days), quota cut from 8 to 6 on 1 July:
 
-| Period | Quota | Days | Contribution |
-| --- | --- | --- | --- |
-| Jan 1 – Jun 30 | 8 | 181 | 8 × 181/365 = **3.97** |
-| Jul 1 – Dec 31 | 6 | 184 | 6 × 184/365 = **3.02** |
-| | | | **6.99 days** |
+| Period         | Quota | Days | Contribution           |
+| -------------- | ----- | ---- | ---------------------- |
+| Jan 1 – Jun 30 | 8     | 181  | 8 × 181/365 = **3.97** |
+| Jul 1 – Dec 31 | 6     | 184  | 6 × 184/365 = **3.02** |
+|                |       |      | **6.99 days**          |
 
 The alternative, `LATEST_POLICY_IN_YEAR`, applies the latest policy's quota to
 the whole year — a mid-year cut then reduces the year retroactively. It is
@@ -813,11 +865,34 @@ remaining  = entitled + carriedForward − used − pending
 - The approver is the employee's **current** manager, read live from the open
   `EmploymentAssignment` on every check — so a manager change re-routes pending
   requests immediately and nothing strands with someone who has left.
-- `LeaveRequest.approverId` records who was *originally* asked. That is **audit
+- `LeaveRequest.approverId` records who was _originally_ asked. That is **audit
   only**; it does not decide who may approve.
-- Falls back to the department head when someone has no manager, so a CEO's
-  direct report is not stranded. A null approver is still possible (the CEO's
-  own request) — only HR can decide those.
+
+#### Manager edge cases, and what happens in each
+
+`LeaveService.resolveApprover` returns `{ approverId, source, note }`, where
+`source` is `MANAGER`, `DEPARTMENT_HEAD` or `NONE`. The employee is told which.
+
+| Situation                                              | What happens                                                |
+| ------------------------------------------------------ | ----------------------------------------------------------- |
+| Manager set and still employed                         | Routed to the manager                                       |
+| Manager has left (`TERMINATED`) or is `SUSPENDED`      | Skipped; falls through to the department head               |
+| Manager's record archived (`deletedAt`)                | Skipped; falls through to the department head               |
+| Manager is the employee themselves                     | Skipped — nobody approves their own leave, even by accident |
+| No manager (a CEO's direct report)                     | Department head                                             |
+| Head also unavailable, or is the employee              | **`NONE`** — see below                                      |
+| A manager tries to approve someone outside their scope | **403**, "This request was not routed to you"               |
+
+⚠️ **`NONE` NEVER MEANS "APPROVE IT ANYWAY".** The request stays `PENDING`, the
+response tells the employee plainly why it could not be routed, **everyone with
+`leave_request:approve` at GLOBAL scope (i.e. HR) is notified**, and it appears
+in HR's approvals queue. Silently approving something nobody agreed to would be
+the worst possible answer; so would dropping it on the floor.
+
+`ON_LEAVE` and `NOTICE_PERIOD` are deliberately **not** treated as unavailable
+— a manager on a week's holiday is still the right approver, and escalating
+past them would surprise everyone.
+
 - **When the policy has `approvalRequired = false`**, the request is APPROVED on
   submission and flagged `autoApproved`, with an explanatory comment. Kept
   distinct from `decidedById = null` so a report can tell "no approval needed"
@@ -828,21 +903,62 @@ remaining  = entitled + carriedForward − used − pending
   decision, the other the employee withdrawing. Collapsing them would destroy
   that distinction in any report.
 
-### The six validation rules, and where they live
+### The seven validation rules, and where they live
 
-All in `LeaveService`, checked in this order so the message a person sees is
-the most useful one:
+All in `LeaveService.createRequest`, checked in this order so the message a
+person sees is the most useful one:
 
-1. End date not before start date
-2. Range contains at least one working day
-3. No overlap with an existing PENDING or APPROVED request
-4. Enough balance — skipped when `requiresBalance` is false
-5. Cannot approve or reject your own request
-6. Cannot decide a request that is already decided
+1. The leave type is active (not archived)
+2. End date not before start date
+3. A policy is in force on the start date
+4. Range contains at least one working day
+5. The policy's minimum notice period is satisfied
+6. No overlap with an existing PENDING or APPROVED request
+7. Enough balance — skipped when `requiresBalance` is false
 
-Rule 5 needs the **explicit self-check**, not just permissions: a manager holds
-`leave_request:approve` at TEAM scope, and TEAM includes themselves, so scope
-alone would let them approve their own leave. Verified directly.
+Plus, at decision time: you cannot decide your own request, and you cannot
+decide one that is already decided.
+
+The self-approval block needs an **explicit check**, not just permissions: a
+manager holds `leave_request:approve` at TEAM scope, and TEAM includes
+themselves, so scope alone would let them approve their own leave.
+
+### Counting leave days: ONE implementation, on the server
+
+`apps/api/src/leave/working-days.ts` is the only code that counts days.
+Weekends are excluded; **public holidays are not, because no holiday calendar
+exists** (see "What is NOT built").
+
+The request form used to have its own copy of that arithmetic so it could
+preview the number instantly. It no longer does. The browser now calls
+`GET /api/leave/working-days?startDate=…&endDate=…` (debounced), so the number
+a person sees before submitting is produced by the same function that stores
+it. The moment a holiday calendar lands in the database, the preview follows
+automatically instead of quietly disagreeing.
+
+`LeaveRequest.days` is stored, not recomputed, so an approved request keeps the
+figure it was approved with even if the rules change later.
+
+### Concurrency: two clicks cannot spend the same days
+
+**The problem.** Someone with 2 days left clicks Submit twice in the same
+instant, or has two tabs open. Both read "2 days remaining", both pass
+validation, both are written — 4 days come out of a 2-day balance. Checking
+then writing is never safe on its own.
+
+**The fix.** `LeaveService.submitUnderLock` opens a transaction and takes
+`SELECT id FROM employees WHERE id = ? FOR UPDATE` on the employee's own row.
+Postgres hands that lock to one transaction at a time, so the second submission
+waits, then re-reads a balance that already includes the first and is correctly
+rejected. The overlap and balance checks are repeated inside the lock; the
+copies outside it exist only to give a fast, friendly error in the ordinary
+case without paying for a lock.
+
+**Why the employee row.** There is no row to lock for a request that does not
+exist yet. The employee is what both submissions have in common, so locking it
+serialises exactly the people who are competing — one person's submissions
+queue behind each other and nobody else is affected. Covered by
+`test/leave-concurrency.spec.ts`, including a five-way burst.
 
 ### Cancellation behaviour
 
@@ -857,12 +973,12 @@ alone would let them approve their own leave. Verified directly.
 
 ### Permission scopes
 
-| AccessRole | request read | approve | create | policy read | policy manage |
-| --- | --- | --- | --- | --- | --- |
-| employee | SELF | *(none at all)* | SELF | — | — |
-| manager | TEAM | TEAM | SELF | — | — |
-| department_head | DEPARTMENT | DEPARTMENT | SELF | — | — |
-| hr_admin | GLOBAL | GLOBAL | GLOBAL | GLOBAL | GLOBAL |
+| AccessRole      | request read | approve         | create | policy read | policy manage |
+| --------------- | ------------ | --------------- | ------ | ----------- | ------------- |
+| employee        | SELF         | _(none at all)_ | SELF   | —           | —             |
+| manager         | TEAM         | TEAM            | SELF   | —           | —             |
+| department_head | DEPARTMENT   | DEPARTMENT      | SELF   | —           | —             |
+| hr_admin        | GLOBAL       | GLOBAL          | GLOBAL | GLOBAL      | GLOBAL        |
 
 - `create` is SELF even for managers, deliberately — it is what stops a manager
   raising and approving a request in one motion. HR's GLOBAL approve unblocks a
@@ -897,34 +1013,36 @@ Flagging these because the spec left them open:
    against a snapshot — but demoted to audit only. Authorisation and the
    approvals queue resolve the current manager live.
 
-### Verified in a browser
+### Verified in a browser (2026-09-29)
 
-**Phase 2 module 1 (2026-09-23), as HR and as an employee:**
+As HR, as a manager, and as an employee:
 
-1. **Test A — create leave type.** As Sana (HR), created *Bereavement Leave*,
-   quota 4, notice 0, approval required. Appeared in the list immediately with
-   its opening policy version.
-2. **Test B — mid-year change.** Created a second version for the same type:
-   6 days from 1 July 2026. The previous version auto-closed at 30 June and
-   **kept its 4 days**. Entitlement recalculated to 5.0 (1.98 + 3.02).
-   Also done on Annual Leave (8 → 6 from 1 July), giving 6.99.
-3. **Test C — historical lookup.** March → 8, 30 June → 8, 1 July → 6,
-   August → 6. Changing the current policy did not alter the March answer.
-4. **Test D — employee balance.** As Zara, Annual Leave shows **6.99 days** with
-   an expandable "Quota changed during 2026" breakdown.
-5. **Test I — permissions.** Zara has no **Leave policy** nav link, the page
-   renders "Not available", and a direct API call returns **403**.
-
-**Earlier (2026-09-17), the request lifecycle:** submit → approve with comment →
-withdraw, with balances moving correctly at each step.
+1. **Leave policy settings** shows Annual **6**, Casual **8**, Sick **6**,
+   Unpaid **0 · no balance needed · auto-approves**.
+2. **Policy history** for Casual Leave shows both versions — _Jan 1 → Sep 28,
+   5 days_ and _Sep 29 → current, 8 days_ — and the 2026 entitlement breakdown
+   (3.71 + 2.06 = 5.77).
+3. **Change log** on the same screen names Sana Iqbal and what she changed.
+4. **Notification bell** shows an unread count; the dropdown lists events with
+   relative times; unread rows are highlighted; _Mark all as read_ clears it.
+5. **Deep link** — clicking "Zara Ahmed requested Casual Leave" opened
+   `/leave/approvals?request=…` with that request ringed in blue and a banner
+   offering "Show everything". Approving from there worked.
+6. **The employee's bell** then showed _"Your Casual Leave was approved — 3
+   days, 14–16 December 2026. Approved by Omar Farooq."_, alongside the earlier
+   rejection carrying the manager's reason, and the auto-approval notice.
+7. **Working-day preview** — Fri 2 Oct to Mon 5 Oct showed **2 working days**,
+   and the network log confirms it came from
+   `GET /api/leave/working-days`, not from browser arithmetic.
+8. **Emails** were written as real `.eml` files and opened to check the
+   subject, both body parts, and the absolute link back into the app.
 
 ### ⚠️ What is NOT built
 
-- **No notifications.** A manager is not told a request is waiting; an employee
-  is not told of a decision. The most visible gap for real use.
 - **No public holiday calendar.** Only weekends are excluded, so leave over Eid
   or Christmas currently consumes those days. `working-days.ts` is the only file
-  that changes when this lands.
+  that changes when this lands — and because the request form now asks the API
+  for the count, the screen will follow automatically.
 - **No accrual, and no automatic carry-forward roll-over.** Entitlement is a
   yearly figure from policy; earned-per-month accrual belongs with Payroll.
 - **No employment-based proration** for mid-year joiners and leavers — see
@@ -935,5 +1053,305 @@ withdraw, with balances moving correctly at each step.
   want before approving.
 - **Requests spanning New Year** are attributed entirely to the start date's
   year rather than split across two balances.
-- **No automated tests.** There is still no test runner in the project;
-  verification is the manual API and browser walkthroughs recorded above.
+- **No reminder for a request left undecided.** The manager is told once, when
+  it is submitted. Nothing chases them afterwards.
+
+---
+
+## 11. Notifications and email (Phase 2 — reusable by every module)
+
+**Nothing in this section is Leave-specific.** Recruitment, Attendance,
+Onboarding, Performance and HR reminders all raise notifications the same way.
+Do not build a second notification system.
+
+### Three tables, and why they are separate
+
+| Table                  | Holds                                                                                    |
+| ---------------------- | ---------------------------------------------------------------------------------------- |
+| `Notification`         | WHAT happened and WHO should know. One row per recipient per event. This is the bell.    |
+| `NotificationDelivery` | An attempt to push that notification down a channel (today: email). One row per channel. |
+| —                      | In-app needs no delivery row: the `Notification` row _is_ the in-app delivery.           |
+
+The in-app record is written in the same breath as the event, so the bell is
+never wrong. Email is slow, external, and fails — it is queued as a delivery
+row and sent later by a background worker. **A dead mail server therefore
+cannot roll back an approved leave request**, and a failed send is a visible
+row with an error on it rather than an email nobody knows was lost.
+
+This is the classic **transactional outbox**: write the intent to the database,
+deliver it afterwards. No Redis, no queue server, and it survives an API
+restart because the intent is a table row.
+
+### Raising one, from anywhere
+
+```ts
+await this.notifications.notify({
+  recipientId: managerId,
+  type: 'leave.request.submitted', // module-namespaced, free string
+  title: 'Zara Ahmed requested Annual Leave',
+  body: '3 days, 9–11 November 2026. Waiting for your decision.',
+  entityType: 'leave_request',
+  entityId: request.id,
+  link: `/leave/approvals?request=${request.id}`,
+  dedupeKey: `leave_request:${request.id}:submitted:${managerId}`,
+  email: { subject, heading, intro, status, details, quote, ctaLabel },
+});
+```
+
+Three rules the service enforces so callers do not have to:
+
+1. **It never throws at the caller.** Notifying is a side effect of a business
+   event, never a precondition for it. A failure is logged and `notify()`
+   returns a result object.
+2. **It is idempotent** — see below.
+3. **Email is queued, never sent inline.** No request handler waits on a mail
+   server.
+
+⚠️ **Call it AFTER your transaction commits, never inside it.** A notification
+about a change that then rolls back is a lie.
+
+### The events Leave raises
+
+| Event                         | Who is told                           | Carries                                                   |
+| ----------------------------- | ------------------------------------- | --------------------------------------------------------- |
+| `leave.request.submitted`     | the current manager                   | employee, type, dates, days, reason, pending status, link |
+| `leave.request.approved`      | the employee                          | type, dates, days, who approved, their comment, link      |
+| `leave.request.rejected`      | the employee                          | type, dates, **the manager's reason**, link               |
+| `leave.request.cancelled`     | the manager who would have decided it | employee, type, dates, whether it had been approved, link |
+| `leave.request.auto_approved` | the employee only                     | type, dates, and that no approval was required            |
+| `leave.request.unrouted`      | everyone with GLOBAL approve (HR)     | why nobody could be found to decide it                    |
+
+Two deliberate silences: **auto-approved leave raises no manager
+notification** (there is no action to prompt), and **cancelling auto-approved
+leave tells nobody**, because no manager was ever involved.
+
+### Duplicate prevention
+
+`Notification.dedupeKey` is **unique in the database** and built from the event,
+not the clock:
+
+```
+leave_request:<requestId>:submitted:<recipientId>
+```
+
+A retried API call, a double-clicked button or a replayed job hits that unique
+index, and the service treats it as "already sent" rather than raising a second
+alert. `NotificationDelivery` adds a second guard — `@@unique([notificationId,
+channel])` means one email per notification, forever. Both are enforced by
+Postgres, not by a check that could race.
+
+### Delivery, retries, and traceability
+
+`NotificationDispatcherService` polls for `PENDING` deliveries every
+`NOTIFICATION_DISPATCH_INTERVAL_MS` (default 15s) and is also kicked
+immediately after queuing, so mail leaves at once rather than on the next tick.
+
+- Each row is **claimed** with a conditional `UPDATE` on `attempts`, so two
+  workers cannot both send it.
+- A retryable failure backs off exponentially (30s, 60s, 2m, 4m…).
+- A permanent failure (bad address, 5xx from the server) is not retried.
+- After `NOTIFICATION_MAX_ATTEMPTS` the row is marked `FAILED` with the error.
+- **One bad row never abandons the batch** — each delivery is individually
+  wrapped.
+
+`GET /api/notifications/:id/deliveries` answers "was the email actually sent?"
+for your own notifications.
+
+⚠️ **Running more than one API instance today could send an email twice**, as
+both could claim the same row in the gap between read and update. At Hazel
+Mobile's size this is theoretical; when the API is scaled out, replace the
+dispatcher with a BullMQ worker on the Redis that is already running. The
+delivery table stays exactly as it is and nothing else changes.
+
+### Email configuration
+
+`EMAIL_TRANSPORT` picks one of three:
+
+| Value  | Behaviour                                                                                                                                                                                                                             |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `file` | Writes a real `.eml` file into `EMAIL_OUTBOX_DIR`. Nothing is sent, but the message is genuinely produced and can be opened in any mail client. **Development default**, and how email notifications are verified without a provider. |
+| `smtp` | Real delivery via nodemailer. Needs `SMTP_HOST`, usually `SMTP_USER`/`SMTP_PASSWORD`. Works with SendGrid, Postmark, SES, Microsoft 365, or a company mail server.                                                                    |
+| `none` | Nothing is attempted. Deliveries are recorded as `SKIPPED` with the reason. **Production default**, so a deployment that forgot to configure email says so.                                                                           |
+
+⚠️ **Nothing ever reports an email as delivered unless a transport accepted
+it.** `SKIPPED` ("we did not try") is a distinct state from `FAILED` ("we tried
+and it bounced"). Start-up validation rejects an unknown `EMAIL_TRANSPORT`
+value and refuses `smtp` without `SMTP_HOST`, so a typo cannot silently become
+"send nothing and say nothing".
+
+**⚠️ The SMTP path has never been exercised against a real server**, because no
+provider is configured for this project. The `file` transport is what has been
+tested end to end. Credentials are read through `ConfigService` and never
+hardcoded; `outbox/` is git-ignored.
+
+### Templates
+
+`notifications/email/email-templates.ts` holds **one shell**, filled with data:
+heading, intro, a label/value table, an optional quote, a status chip, and a
+call-to-action button. Business logic never builds HTML. Inline styles and
+tables throughout, because Outlook ignores most modern CSS — keeping that in
+one file means a rebrand is one edit.
+
+Every interpolated value is HTML-escaped, and a plain-text alternative is
+generated alongside the HTML.
+
+⚠️ **Deliberately no sensitive detail in email.** Email is unencrypted,
+forwarded, and archived on servers we do not control. These messages say what
+happened and link back to the app — no salary, no medical notes, no national
+ID, no document contents. The leave _reason_ is included because the manager
+needs it to decide and the employee wrote it themselves.
+
+### The notification centre (web)
+
+A bell in the header, on every authenticated page, for anyone with an employee
+record. Unread count, dropdown list, per-item and mark-all-as-read, and deep
+links. It polls `GET /api/notifications/unread-count` every 30 seconds — one
+number, not the list. A WebSocket would be instant but needs connection
+handling and auth on a second channel; for an internal tool, polling is the
+honest trade.
+
+**Deep links** carry `?request=<id>`. The destination page highlights that row
+and scrolls to it, so "open the request" means opening the request rather than
+landing on a list of twenty. See `components/deep-link.tsx`.
+
+### Permissions: there are none, on purpose
+
+Every notification endpoint reads or writes exactly the signed-in person's own
+notifications. **There is no parameter that could name a different recipient**,
+so SELF scope is structurally enforced rather than checked. Marking someone
+else's notification read updates zero rows and returns 404. The global
+`JwtAuthGuard` still applies, so an anonymous caller gets 401.
+
+---
+
+## 12. Automated tests (Phase 2)
+
+**132 tests, 8 suites.** Deferred since Phase 0; built now, and wired into CI
+so they run on every push.
+
+```bash
+npm test          # everything — needs Postgres running (npm run db:up)
+npm run test:unit # pure logic only, no database, seconds
+npm run test:watch
+```
+
+### Two kinds, and the split matters
+
+| Where                       | Kind                                                                     | What it covers                                                           |
+| --------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| `apps/api/src/**/*.spec.ts` | **Unit** — no database, no HTTP                                          | Working-day counting, proration arithmetic, email rendering and escaping |
+| `apps/api/test/*.spec.ts`   | **Integration** — real NestJS app, real Postgres, real HTTP, real logins | Everything else                                                          |
+
+The integration tests exist because **the guarantees most worth protecting are
+not in TypeScript at all**:
+
+- the Postgres `EXCLUDE` constraint that makes overlapping policy versions
+  impossible — tested by writing an overlapping row in raw SQL and expecting it
+  to be rejected
+- the `SELECT … FOR UPDATE` lock that stops two simultaneous requests spending
+  the same days
+- `forbidNonWhitelisted` on the global `ValidationPipe` rejecting an attempt to
+  rewrite a historical quota
+- the unique index behind notification idempotency
+
+A suite that mocked the database would pass whether or not any of those still
+worked.
+
+### How it is wired
+
+- **Its own database.** `velixa_hr_dev_test`, derived from `DATABASE_URL` by
+  appending `_test`, created and migrated by `test/global-setup.ts`. ⚠️ It
+  truncates every table before each file, so it must never point at the
+  development database — `test/test-database.ts` is the single place that
+  decides.
+- **`migrate deploy`, not `db push`** — a schema pushed from `schema.prisma`
+  would not have the hand-written exclusion constraint, and the test proving
+  overlaps are impossible would pass against a database that allows them.
+- **One worker** (`maxWorkers: 1`). Every file resets the same database.
+- **The dispatcher timer is off** (`NOTIFICATION_DISPATCH_INTERVAL_MS=0`) so
+  tests drive delivery explicitly and never race a background send.
+- **Fixtures import `prisma/seed-data.ts`** — the same permission catalogue and
+  access-role scopes the seed writes. A test that declared its own grants would
+  keep passing after someone widened a real scope.
+
+### What is covered
+
+Policy (initial quotas, effective-dated lookup, history preserved, overlap
+refused at both service and database level, history not rewritable, archive and
+restore, audit); balances (entitlement, mid-year proration, used, pending,
+remaining, cancel restores, reject does not consume, HR override, several
+pending requests counted together); requests (date order, weekend-only range,
+minimum notice, insufficient balance, overlap, archived type, unpaid,
+auto-approval); approval (manager resolution, re-routing on a manager change,
+terminated and archived managers, self-approval, out-of-scope manager, HR
+override, double decision, cancellation rules); permissions (401, SELF/TEAM/
+GLOBAL visibility, crafted query strings, policy admin HR-only, requests on
+behalf); notifications (every event, in-app and email content, deep links,
+duplicate prevention at the database level, the centre, delivery, retries,
+`SKIPPED`, **a broken mail server not rolling back an approval**, audit);
+concurrency (two tabs, a five-way burst, an exact duplicate, and that one
+person's submissions do not block another's).
+
+### Known gaps in coverage
+
+- **No frontend tests.** No React component or end-to-end browser test exists.
+  The UI is verified by hand (§10).
+- **Core HR and Auth have unit coverage only through what Leave exercises.**
+  Employee CRUD, documents and the org chart have no dedicated tests yet.
+- **The SMTP transport is not tested** — there is no provider to test against.
+
+---
+
+## 13. The audit log (Phase 2)
+
+One generic `audit_logs` table: `actorId`, `action`, `entityType`, `entityId`,
+`summary`, `before`, `after`, `createdAt`. **Every module writes here.** Do not
+add a per-module history table for "who did it".
+
+```ts
+await this.audit.record({
+  actorId,
+  action: 'leave_request.approved',
+  entityType: 'leave_request',
+  entityId: request.id,
+  summary:
+    'Omar Farooq approved Zara Ahmed’s Annual Leave, 9–11 Nov 2026 (3 days)',
+  before: { status: 'PENDING' },
+  after: { status: 'APPROVED' },
+});
+```
+
+### It is not the same thing as an effective-dated table
+
+|                                           | Answers                          | Nature                                                         |
+| ----------------------------------------- | -------------------------------- | -------------------------------------------------------------- |
+| `EmploymentAssignment`, `LeaveTypePolicy` | _What was the record on date D?_ | Business data. Queried by date. Losing a row corrupts payroll. |
+| `AuditLog`                                | _Who pressed the button?_        | Forensics. Queried by entity or person. Append-only.           |
+
+### Rules
+
+- **Recorded AFTER the business transaction commits**, never inside it, and
+  every write is wrapped in try/catch. A platform that refused to approve leave
+  because its audit table was full would be worse than one with a gap in the log.
+- **`summary` is stored, not rebuilt on read.** The names and numbers it
+  mentions may since have changed; the log should say what was true then.
+- **Append-only.** Correct a mistake by recording a correction beside it, never
+  by editing. There is a worked example in the development data: two policy
+  versions were opened effective 1 October, then moved to 29 September; the
+  original entries stand and a `leave_policy.version_corrected` entry sits
+  beside them.
+
+### What Leave records
+
+`leave_type.created`, `.updated`, `.archived`, `.restored`;
+`leave_policy.version_created`, `.version_amended`;
+`leave_request.created`, `.auto_approved`, `.approved`, `.rejected`,
+`.cancelled`; `leave_balance.set`.
+
+Readable at `GET /api/leave/types/:id/audit` (needs `leave_policy:read`, so HR
+only) and shown as **Change log** on the Leave policy settings screen.
+
+### Not built
+
+No global audit browser, and no audit yet from the Core HR or Auth modules —
+`AuditService` is global and they should start calling it.

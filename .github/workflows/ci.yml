@@ -2,14 +2,17 @@
 # Velixa HR — Continuous Integration
 #
 # Runs automatically on GitHub every time you push or open a pull request.
-# It does NOT deploy anything. It only answers one question:
-# "does this code still lint and build?"
+# It does NOT deploy anything. It answers one question:
+# "does this code still lint, build, and pass its tests?"
 #
 # You can watch runs under the "Actions" tab of the GitHub repo.
 # A green tick means the checks passed; a red cross means something broke.
 #
-# No database is needed here — `prisma generate` only reads the schema file,
-# and neither app connects to Postgres at build time.
+# A REAL POSTGRES RUNS HERE. The integration tests need one, because the
+# guarantees most worth protecting are not in TypeScript at all — the exclusion
+# constraint that makes overlapping leave policies impossible, and the row lock
+# that stops two simultaneous requests spending the same days. A suite that
+# mocked the database would pass whether or not either still worked.
 # =============================================================================
 
 name: CI
@@ -29,15 +32,41 @@ concurrency:
 
 env:
   NODE_VERSION: '24'
-  # Prisma insists on a syntactically valid connection string even for commands
-  # that never open a connection. This is a dummy value; nothing connects to it.
+  # Points at the Postgres service below. The test suite derives its own
+  # database name from this by appending `_test`, and creates it on first run,
+  # so nothing here touches the `ci` database itself.
   DATABASE_URL: 'postgresql://ci:ci@localhost:5432/ci?schema=public'
+  # Long enough to satisfy start-up validation. Throwaway CI values.
+  JWT_ACCESS_SECRET: 'ci-access-secret-that-is-definitely-long-enough-01'
+  JWT_REFRESH_SECRET: 'ci-refresh-secret-that-is-definitely-long-enough-02'
+  # Emails are written to a scratch directory rather than sent anywhere.
+  EMAIL_TRANSPORT: 'file'
+  EMAIL_OUTBOX_DIR: './ci-outbox'
+  # 0 disables the background dispatcher, so tests drive delivery explicitly
+  # and never race a timer.
+  NOTIFICATION_DISPATCH_INTERVAL_MS: '0'
 
 jobs:
   verify:
-    name: Lint & Build
+    name: Lint, Build & Test
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        ports:
+          - 5432:5432
+        # Nothing may run until the database actually accepts connections.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - name: Check out repository
@@ -83,3 +112,8 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Test
+        # Unit tests plus integration tests against the Postgres service above.
+        # The suite creates and migrates its own `ci_test` database.
+        run: npm test

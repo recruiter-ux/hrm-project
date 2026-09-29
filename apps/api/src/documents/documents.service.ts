@@ -1,4 +1,9 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { DocumentType, PermissionScope } from '@prisma/client';
 
 import { PermissionsService } from '../permissions/permissions.service';
@@ -133,7 +138,11 @@ export class DocumentsService {
    * Resolves a document for download, after checking both the employee scope
    * and the confidential flag. Returns the metadata plus a read stream.
    */
-  async getForDownload(callerEmployeeId: string | null, scope: PermissionScope, documentId: string) {
+  async getForDownload(
+    callerEmployeeId: string | null,
+    scope: PermissionScope,
+    documentId: string,
+  ) {
     const document = await this.prisma.document.findFirst({
       where: { id: documentId, deletedAt: null },
       select: {

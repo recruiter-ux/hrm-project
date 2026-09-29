@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import {
   buttonClass,
@@ -13,31 +13,20 @@ import {
   Spinner,
 } from '@/components/ui';
 import { api, ApiError } from '@/lib/api';
-import type { LeaveBalancesResponse, LeaveType } from '@/lib/types';
+import type { LeaveBalancesResponse, LeaveType, WorkingDaysResponse } from '@/lib/types';
 
 /**
- * Counts working days the same way the API does (weekends excluded, no holiday
- * calendar yet), purely so the form can preview the number before submitting.
+ * ⚠️ THE BROWSER DOES NOT COUNT DAYS.
  *
- * The API recalculates it server-side and that value is what gets stored — this
- * is a convenience, never the source of truth.
+ * This form used to have its own copy of the weekend rules so it could preview
+ * the number instantly. Two implementations of the same arithmetic is exactly
+ * the drift this module cannot afford: the day a public-holiday calendar lands
+ * in the database, the server would start returning 4 and the screen would
+ * still be promising 5.
+ *
+ * So the preview asks the API — the same function that stores the figure. It
+ * costs one small request per date change, debounced.
  */
-function countWorkingDays(start: string, end: string): number {
-  if (!start || !end) return 0;
-  const from = new Date(`${start}T00:00:00Z`);
-  const to = new Date(`${end}T00:00:00Z`);
-  if (to < from) return 0;
-
-  let count = 0;
-  const cursor = new Date(from);
-  while (cursor <= to) {
-    const day = cursor.getUTCDay();
-    if (day !== 0 && day !== 6) count += 1;
-    cursor.setUTCDate(cursor.getUTCDate() + 1);
-  }
-  return count;
-}
-
 export default function NewLeaveRequestPage() {
   const router = useRouter();
 
@@ -69,7 +58,37 @@ export default function NewLeaveRequestPage() {
     })();
   }, []);
 
-  const days = useMemo(() => countWorkingDays(startDate, endDate), [startDate, endDate]);
+  // The authoritative working-day count, from the API.
+  const [preview, setPreview] = useState<WorkingDaysResponse | null>(null);
+
+  useEffect(() => {
+    if (!startDate || !endDate) {
+      setPreview(null);
+      return;
+    }
+
+    // Debounced, because a date input fires on every keystroke while someone
+    // types a year.
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          setPreview(
+            await api<WorkingDaysResponse>(
+              `/api/leave/working-days?startDate=${startDate}&endDate=${endDate}`,
+            ),
+          );
+        } catch {
+          // A failed preview must not block the form. The API re-checks and
+          // gives a proper message on submit.
+          setPreview(null);
+        }
+      })();
+    }, 250);
+
+    return () => clearTimeout(timer);
+  }, [startDate, endDate]);
+
+  const days = preview?.days ?? 0;
   const selectedType = types?.find((t) => t.id === leaveTypeId);
   const balance = balances?.balances.find((b) => b.leaveTypeId === leaveTypeId);
 
@@ -108,7 +127,10 @@ export default function NewLeaveRequestPage() {
   return (
     <div className="max-w-2xl space-y-6">
       <div>
-        <Link href="/leave" className="text-sm text-[var(--muted)] underline-offset-2 hover:underline">
+        <Link
+          href="/leave"
+          className="text-sm text-[var(--muted)] underline-offset-2 hover:underline"
+        >
           ← My leave
         </Link>
         <h1 className="mt-1 text-2xl font-semibold">Request leave</h1>
@@ -183,18 +205,29 @@ export default function NewLeaveRequestPage() {
           </div>
 
           <div className="rounded-md border border-[var(--border)] p-3 text-sm">
-            <span className="font-medium">
-              {days} working day{days === 1 ? '' : 's'}
-            </span>
-            {days === 0 && (
-              <span className="ml-2 text-[var(--muted)]">
-                — that range has no working days in it.
-              </span>
-            )}
-            {overBalance && (
-              <span className="ml-2 text-red-700 dark:text-red-400">
-                — more than your remaining balance.
-              </span>
+            {!preview ? (
+              <span className="text-[var(--muted)]">Counting working days…</span>
+            ) : (
+              <>
+                <span className="font-medium">
+                  {days} working day{days === 1 ? '' : 's'}
+                </span>
+                {!preview.valid && (
+                  <span className="ml-2 text-red-700 dark:text-red-400">
+                    — the end date is before the start date.
+                  </span>
+                )}
+                {preview.valid && days === 0 && (
+                  <span className="ml-2 text-[var(--muted)]">
+                    — that range has no working days in it.
+                  </span>
+                )}
+                {overBalance && (
+                  <span className="ml-2 text-red-700 dark:text-red-400">
+                    — more than your remaining balance.
+                  </span>
+                )}
+              </>
             )}
           </div>
 

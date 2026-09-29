@@ -21,7 +21,10 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
     super({
       log:
         process.env.NODE_ENV === 'development'
-          ? [{ emit: 'stdout', level: 'warn' }, { emit: 'stdout', level: 'error' }]
+          ? [
+              { emit: 'stdout', level: 'warn' },
+              { emit: 'stdout', level: 'error' },
+            ]
           : [{ emit: 'stdout', level: 'error' }],
     });
   }

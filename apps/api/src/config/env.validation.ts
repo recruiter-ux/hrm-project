@@ -30,7 +30,7 @@ export function validateEnv(config: Record<string, unknown>): Record<string, unk
         '  macOS / Linux:       cp .env.example .env',
         '',
         'Generate a secret with:',
-        '  node -e "console.log(require(\'crypto\').randomBytes(48).toString(\'base64url\'))"',
+        "  node -e \"console.log(require('crypto').randomBytes(48).toString('base64url'))\"",
       ].join('\n'),
     );
   }
@@ -70,6 +70,21 @@ export function validateEnv(config: Record<string, unknown>): Record<string, unk
   const port = config.API_PORT;
   if (port !== undefined && Number.isNaN(Number(port))) {
     throw new Error(`API_PORT must be a number. Received: "${String(port)}"`);
+  }
+
+  // --- Email (Phase 2) ------------------------------------------------------
+  // A typo in EMAIL_TRANSPORT must not fall through to "send nothing and say
+  // nothing" — that is exactly the failure that makes people believe emails
+  // went out when they did not.
+  const transport = config.EMAIL_TRANSPORT;
+  if (transport !== undefined && !['file', 'smtp', 'none'].includes(String(transport))) {
+    throw new Error(
+      `EMAIL_TRANSPORT must be one of: file, smtp, none. Received: "${String(transport)}"`,
+    );
+  }
+
+  if (String(transport) === 'smtp' && !String(config.SMTP_HOST ?? '').trim()) {
+    throw new Error('EMAIL_TRANSPORT=smtp requires SMTP_HOST to be set.');
   }
 
   return config;

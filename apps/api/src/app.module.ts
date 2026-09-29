@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
 
+import { AuditModule } from './audit/audit.module';
 import { AuthModule } from './auth/auth.module';
 import { JwtAuthGuard } from './auth/guards/jwt-auth.guard';
 import configuration from './config/configuration';
@@ -10,6 +11,7 @@ import { DocumentsModule } from './documents/documents.module';
 import { EmployeesModule } from './employees/employees.module';
 import { HealthModule } from './health/health.module';
 import { LeaveModule } from './leave/leave.module';
+import { NotificationModule } from './notifications/notification.module';
 import { PermissionsGuard } from './permissions/permissions.guard';
 import { PermissionsModule } from './permissions/permissions.module';
 import { PrismaModule } from './prisma/prisma.module';
@@ -39,11 +41,15 @@ import { StorageModule } from './storage/storage.module';
       cache: true,
     }),
 
-    // Infrastructure
+    // Infrastructure. All global — a feature module injects these without
+    // importing anything, which is why AuditModule and NotificationModule
+    // belong here rather than next to Leave.
     PrismaModule,
     RedisModule,
     StorageModule,
     PermissionsModule,
+    AuditModule,
+    NotificationModule,
 
     // Features
     AuthModule,

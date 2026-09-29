@@ -6,18 +6,18 @@ Internal HR platform for **Hazel Mobile**.
 in, browse and edit employees, upload documents, and view the org chart. What
 each person can see depends on their access level.
 
-For *why* things were built this way, see **[PROJECT_NOTES.md](PROJECT_NOTES.md)**.
+For _why_ things were built this way, see **[PROJECT_NOTES.md](PROJECT_NOTES.md)**.
 
 ---
 
 ## What is in here
 
-| Piece | What it does | Runs at |
-| --- | --- | --- |
-| **API** (NestJS) | The backend. Talks to the database. | http://localhost:4000 |
-| **Web** (Next.js) | The website you look at. | http://localhost:3000 |
-| **Postgres** | The database where HR data lives. | port 5432 |
-| **Redis** | A fast cache. Nothing uses it yet. | port 6379 |
+| Piece             | What it does                        | Runs at               |
+| ----------------- | ----------------------------------- | --------------------- |
+| **API** (NestJS)  | The backend. Talks to the database. | http://localhost:4000 |
+| **Web** (Next.js) | The website you look at.            | http://localhost:3000 |
+| **Postgres**      | The database where HR data lives.   | port 5432             |
+| **Redis**         | A fast cache. Nothing uses it yet.  | port 6379             |
 
 Postgres and Redis run inside **Docker**, so you do not install them yourself.
 
@@ -104,12 +104,12 @@ Open <http://localhost:3000> in your browser. You should see a sign-in screen.
 
 Sign in with any of these. **The password for all of them is `Password123!`**
 
-| Email | What they can see |
-| --- | --- |
-| `sana.iqbal@hazelmobile.com` | HR administrator — everyone |
-| `bilal.khan@hazelmobile.com` | Department head — Engineering and its sub-teams |
-| `omar.farooq@hazelmobile.com` | Manager — himself and his direct reports |
-| `zara.ahmed@hazelmobile.com` | Employee — only herself |
+| Email                         | What they can see                               |
+| ----------------------------- | ----------------------------------------------- |
+| `sana.iqbal@hazelmobile.com`  | HR administrator — everyone                     |
+| `bilal.khan@hazelmobile.com`  | Department head — Engineering and its sub-teams |
+| `omar.farooq@hazelmobile.com` | Manager — himself and his direct reports        |
+| `zara.ahmed@hazelmobile.com`  | Employee — only herself                         |
 
 Signing in as two different people and comparing what they see is the quickest
 way to confirm permissions are working.
@@ -117,13 +117,27 @@ way to confirm permissions are working.
 These accounts exist only because the seed script creates them. Adding an
 employee through the UI does **not** create a login — that comes in Phase 2.
 
+### Where do the emails go?
+
+Velixa HR sends email when leave is requested, approved, rejected or cancelled.
+No mail provider is connected, so in development nothing leaves your machine —
+each message is written to a file in the `outbox/` folder instead. Double-click
+one to read exactly what the person would have received.
+
+To send real email, set `EMAIL_TRANSPORT=smtp` and the `SMTP_*` values in
+`.env`. Until then the system records those emails as **skipped**, never as
+sent — it will not tell you something was delivered when it was not.
+
+The in-app notifications (the bell in the top bar) always work and need no
+configuration at all.
+
 ### Two extra checks (optional)
 
 **See the raw API response** — open <http://localhost:4000/health>. You should
 get a block of text starting with `{"status":"ok"`. This is the only endpoint
 that works without signing in; everything else returns "Unauthorized" by design.
 
-**See the sample data in the database** — in a *second* terminal window:
+**See the sample data in the database** — in a _second_ terminal window:
 
 ```bash
 npm run prisma:studio
@@ -145,16 +159,32 @@ Close Studio with `Ctrl + C` when done.
 
 Run these from the project folder.
 
-| Command | What it does |
-| --- | --- |
-| `npm run dev` | Start the API and website. **The main one.** |
-| `npm run db:up` | Start the database containers. |
-| `npm run db:down` | Stop the database containers (data is kept). |
-| `npm run prisma:studio` | Browse the database in your browser. |
-| `npm run db:seed` | Re-add the sample data. Safe to run repeatedly. |
-| `npm run lint` | Check the code for mistakes. |
-| `npm run build` | Check that everything compiles, as CI does. |
-| `npm run format` | Auto-tidy formatting across the project. |
+| Command                 | What it does                                     |
+| ----------------------- | ------------------------------------------------ |
+| `npm run dev`           | Start the API and website. **The main one.**     |
+| `npm run db:up`         | Start the database containers.                   |
+| `npm run db:down`       | Stop the database containers (data is kept).     |
+| `npm run prisma:studio` | Browse the database in your browser.             |
+| `npm run db:seed`       | Re-add the sample data. Safe to run repeatedly.  |
+| `npm test`              | Run all 132 automated tests. Needs the database. |
+| `npm run test:unit`     | The fast ones only — no database, a few seconds. |
+| `npm run lint`          | Check the code for mistakes.                     |
+| `npm run build`         | Check that everything compiles, as CI does.      |
+| `npm run format`        | Auto-tidy formatting across the project.         |
+
+### About the tests
+
+`npm test` starts a real copy of the API, points it at a **separate test
+database** (`velixa_hr_dev_test`, created automatically the first time), and
+exercises it over real HTTP as HR, as a manager, and as an employee. Your
+development data is never touched.
+
+If they all pass, the things that would otherwise break silently are still
+working: the leave quota maths, who is allowed to see what, and the database
+rules that stop two people spending the same days off. CI runs them on every
+push, so a red cross on GitHub means something genuinely broke.
+
+Run them before and after any change to the Leave module.
 
 ### After changing the database schema
 
@@ -228,7 +258,7 @@ npm run setup
 
 Git has already been initialised here with an initial commit. To publish it:
 
-**1.** On GitHub, create a **new empty repository**. Do *not* tick "Add a
+**1.** On GitHub, create a **new empty repository**. Do _not_ tick "Add a
 README", "Add .gitignore", or "Choose a license" — this project already has
 them, and pre-filled files cause a conflict on the first push.
 
@@ -264,7 +294,7 @@ git commit -m "Describe what you changed"
 git push
 ```
 
-> **Note:** run `npm run setup` (or at least `npm install`) *before* your first
+> **Note:** run `npm run setup` (or at least `npm install`) _before_ your first
 > push, so that `package-lock.json` exists and gets committed. It pins exact
 > dependency versions so CI and your machine install identically.
 
@@ -275,16 +305,16 @@ git push
 The name appears in three forms, because "Velixa HR" is not a legal identifier
 everywhere a name is needed:
 
-| Form | Used for |
-| --- | --- |
-| `Velixa HR` | Prose, page titles, UI text |
+| Form        | Used for                                                      |
+| ----------- | ------------------------------------------------------------- |
+| `Velixa HR` | Prose, page titles, UI text                                   |
 | `velixa-hr` | npm package name and scope, Docker container and volume names |
-| `velixa_hr` | The Postgres database, `velixa_hr_dev` |
+| `velixa_hr` | The Postgres database, `velixa_hr_dev`                        |
 
 You will not normally touch these. If the name ever changes again,
 **[PROJECT_NOTES.md § 7](PROJECT_NOTES.md#7-the-product-name)** has the ordered
 checklist — the two steps people forget are clearing the Docker volumes
-*before* renaming them, and re-running `npm install` afterwards.
+_before_ renaming them, and re-running `npm install` afterwards.
 
 The repo folder (`HRM`) and the GitHub repo (`hrm-project`) still use the old
 working name. Neither affects anything; rename them whenever you like.

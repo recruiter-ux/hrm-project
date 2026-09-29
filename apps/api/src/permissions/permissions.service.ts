@@ -171,6 +171,37 @@ export class PermissionsService {
   }
 
   /**
+   * Everyone who holds one permission at one exact scope.
+   *
+   * The reverse of every other method here: instead of "what may this person
+   * do?", it asks "who can do this?". Notifications need it — when a leave
+   * request cannot be routed to a manager, somebody has to be told, and the
+   * right somebody is whoever can actually decide it (GLOBAL approvers, i.e.
+   * HR) rather than a hardcoded list of email addresses.
+   *
+   * Archived and terminated employees are excluded: alerting someone who has
+   * left is worse than useless, because it looks like the alert was delivered.
+   */
+  async findEmployeesWithPermissionAtScope(
+    permissionKey: string,
+    scope: PermissionScope,
+  ): Promise<string[]> {
+    const grants = await this.prisma.employeeAccessRole.findMany({
+      where: {
+        OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+        employee: { deletedAt: null, status: { notIn: ['TERMINATED', 'SUSPENDED'] } },
+        accessRole: {
+          permissions: { some: { scope, permission: { is: { key: permissionKey } } } },
+        },
+      },
+      select: { employeeId: true },
+      distinct: ['employeeId'],
+    });
+
+    return grants.map((grant) => grant.employeeId);
+  }
+
+  /**
    * Whether the caller may act on one specific employee. Used by the
    * single-record endpoints (view, edit) where a list filter is not enough.
    */

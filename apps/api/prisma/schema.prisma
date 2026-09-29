@@ -245,18 +245,24 @@ model Employee {
   user                User?                  @relation("UserEmployee")
 
   // --- Leave (Phase 2) ---
-  leaveBalances       LeaveBalance[]         @relation("LeaveBalanceEmployee")
+  leaveBalances        LeaveBalance[]    @relation("LeaveBalanceEmployee")
   /// Leave this person has requested.
-  leaveRequests       LeaveRequest[]         @relation("LeaveRequestEmployee")
+  leaveRequests        LeaveRequest[]    @relation("LeaveRequestEmployee")
   /// Leave requests routed to this person for a decision.
-  leaveApprovals      LeaveRequest[]         @relation("LeaveRequestApprover")
+  leaveApprovals       LeaveRequest[]    @relation("LeaveRequestApprover")
   /// Leave requests this person actually decided. Usually the same as
   /// leaveApprovals, but HR can decide a request routed to someone else.
-  leaveDecisions      LeaveRequest[]         @relation("LeaveRequestDecider")
+  leaveDecisions       LeaveRequest[]    @relation("LeaveRequestDecider")
   /// Leave policy versions this person authored — the audit trail for
   /// "who changed the Annual Leave quota, and when?".
-  leavePoliciesCreated LeaveTypePolicy[]     @relation("LeavePolicyCreator")
-  leavePoliciesUpdated LeaveTypePolicy[]     @relation("LeavePolicyUpdater")
+  leavePoliciesCreated LeaveTypePolicy[] @relation("LeavePolicyCreator")
+  leavePoliciesUpdated LeaveTypePolicy[] @relation("LeavePolicyUpdater")
+
+  // --- Platform services (Phase 2) ------------------------------------------
+  /// In-app notifications addressed to this person.
+  notifications Notification[] @relation("NotificationRecipient")
+  /// Changes this person made, across every module.
+  auditEntries  AuditLog[]     @relation("AuditActor")
 
   // --- Indexes --------------------------------------------------------------
   // An index makes filtering on a column fast. These cover the queries the
@@ -928,7 +934,7 @@ model LeaveTypePolicy {
   minNoticeDays Int @default(0) @map("min_notice_days")
 
   /// First day this policy applies.
-  effectiveFrom DateTime @map("effective_from") @db.Date
+  effectiveFrom DateTime  @map("effective_from") @db.Date
   /// Last day it applies. NULL means "still current".
   effectiveTo   DateTime? @map("effective_to") @db.Date
 
@@ -1071,4 +1077,207 @@ model LeaveRequest {
   @@index([employeeId, startDate, endDate])
   @@index([status])
   @@map("leave_requests")
+}
+
+// =============================================================================
+// NOTIFICATIONS (Phase 2 — built with Leave, designed for every module)
+//
+// Two tables, and the split between them is the whole idea:
+//
+//   Notification          WHAT happened and WHO should know. One row per
+//                         recipient per event. This is the bell in the header.
+//   NotificationDelivery  An attempt to push that same notification down a
+//                         channel (today: email). One row per channel.
+//
+// WHY THEY ARE SEPARATE
+// The in-app record is written in the same breath as the event, so the bell is
+// never wrong. Email is slow, external, and fails — it is queued as a delivery
+// row and sent later by a background worker. A dead mail server therefore
+// cannot roll back an approved leave request, and a failed send is a visible
+// row with an error on it rather than a lost email nobody knows about.
+//
+// This is the classic "transactional outbox": write the intent to the database
+// with the business change, deliver it afterwards. It needs no Redis, no queue
+// server, and it survives an API restart because the intent is a table row.
+//
+// NOT LEAVE-SPECIFIC. Nothing here mentions leave. Recruitment, Attendance,
+// Onboarding, Performance and HR reminders all raise notifications the same
+// way: NotificationService.notify({ recipientId, type, title, body, link }).
+// =============================================================================
+
+/// How a notification reaches someone.
+///
+/// IN_APP is deliberately absent: the Notification row IS the in-app delivery,
+/// so there is nothing to attempt and nothing to retry.
+enum NotificationChannel {
+  EMAIL
+}
+
+enum NotificationDeliveryStatus {
+  /// Queued, waiting for the dispatcher.
+  PENDING
+  SENT
+  /// Every retry exhausted. Needs a human to look.
+  FAILED
+  /// Deliberately not attempted — no email provider configured, or the
+  /// recipient has no work email on file. Distinct from FAILED so that
+  /// "we never tried" is never mistaken for "we tried and it bounced".
+  SKIPPED
+}
+
+/// One thing one person should know about.
+model Notification {
+  id String @id @default(cuid())
+
+  recipientId String   @map("recipient_id")
+  recipient   Employee @relation("NotificationRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+
+  /// Module-namespaced event key, e.g. "leave.request.submitted".
+  ///
+  /// A plain string rather than an enum on purpose: a new module must be able
+  /// to raise a new kind of notification without a database migration.
+  type String
+
+  title String
+  /// One or two plain sentences. No HTML — the UI renders it as text.
+  body  String
+
+  /// What this is about. Nullable because not every notification has a
+  /// subject (an HR broadcast does not).
+  entityType String? @map("entity_type")
+  entityId   String? @map("entity_id")
+
+  /// Where clicking the notification goes, relative to the web app root,
+  /// e.g. "/leave/approvals". The DEEP LINK.
+  link String?
+
+  /// Null means unread. A timestamp rather than a boolean so "when did they
+  /// see it?" is answerable.
+  readAt DateTime? @map("read_at")
+
+  /// ⚠️ IDEMPOTENCY KEY — this is what stops duplicate notifications.
+  ///
+  /// Built from the event, not from the clock:
+  ///   "leave_request:<id>:submitted:<recipientId>"
+  ///
+  /// If the same API call is retried — a flaky network, an impatient
+  /// double-click, a job replayed — the second insert hits this unique index
+  /// and the service treats it as "already sent" instead of raising a second
+  /// alert. Nullable so a genuinely repeatable notification (a daily digest)
+  /// can opt out.
+  dedupeKey String? @unique @map("dedupe_key")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  deliveries NotificationDelivery[]
+
+  /// Covers the bell's two queries: the unread count, and the list.
+  @@index([recipientId, readAt])
+  @@index([recipientId, createdAt])
+  @@index([entityType, entityId])
+  @@map("notifications")
+}
+
+/// An attempt to deliver one notification down one channel.
+///
+/// ⚠️ NEVER WRITTEN INSIDE A BUSINESS TRANSACTION. A leave approval commits
+/// first; the delivery row is queued straight afterwards. If queuing itself
+/// fails, the approval still stands and the failure is logged — the reverse
+/// (an email outage rolling back an approval) would be far worse.
+model NotificationDelivery {
+  id String @id @default(cuid())
+
+  notificationId String       @map("notification_id")
+  notification   Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+
+  channel NotificationChannel
+  status  NotificationDeliveryStatus @default(PENDING)
+
+  /// The address used, snapshotted. If the employee's work email changes
+  /// later, this still records where the mail actually went.
+  toAddress String? @map("to_address")
+
+  /// THE MESSAGE ITSELF, RENDERED AT QUEUE TIME.
+  ///
+  /// The outbox holds a finished message, not a recipe for one. The dispatcher
+  /// therefore knows nothing about templates — it picks up a row and sends it.
+  /// It also means the record shows exactly what was delivered, even after the
+  /// template is redesigned, and a retry cannot quietly send different words
+  /// from the first attempt.
+  subject  String?
+  bodyHtml String? @map("body_html")
+  bodyText String? @map("body_text")
+
+  attempts  Int     @default(0)
+  lastError String? @map("last_error")
+
+  /// When the dispatcher may next try. Back-off doubles after each failure, so
+  /// a mail server that is down for an hour is not hammered every second.
+  nextAttemptAt DateTime? @map("next_attempt_at")
+  sentAt        DateTime? @map("sent_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  /// The second duplicate guard: one email per notification, forever. Even if
+  /// the queuing code ran twice, the database refuses the second row.
+  @@unique([notificationId, channel])
+  /// The dispatcher's only query: "what is due?"
+  @@index([status, nextAttemptAt])
+  @@map("notification_deliveries")
+}
+
+// =============================================================================
+// AUDIT LOG (Phase 2)
+//
+// The general "who changed what" record that PROJECT_NOTES section 6 flagged
+// as missing. It is generic on purpose — every module writes to this one table
+// rather than inventing its own history.
+//
+// This does NOT replace the effective-dated tables. The distinction matters:
+//
+//   EmploymentAssignment / LeaveTypePolicy   the record ITSELF, over time.
+//                                            Business data. Queried by date.
+//   AuditLog                                 who pressed the button. Forensics.
+//                                            Queried by entity or by person.
+//
+// Losing an audit row loses an answer to "who did this?". Losing an
+// effective-dated row corrupts payroll. They are not the same thing, and the
+// audit log is deliberately the cheaper, append-only one.
+// =============================================================================
+
+model AuditLog {
+  id String @id @default(cuid())
+
+  /// Null for something the system did on its own (a scheduled job).
+  actorId String?   @map("actor_id")
+  actor   Employee? @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  /// Module-namespaced, past tense: "leave_request.approved".
+  action String
+
+  entityType String @map("entity_type")
+  entityId   String @map("entity_id")
+
+  /// A readable one-liner, written at the time:
+  /// "Approved Zara Ahmed's Annual Leave, 9-11 Nov 2026 (3 days)".
+  ///
+  /// Stored rather than rebuilt on read, because the names and numbers it
+  /// mentions may since have changed — and the log should say what was true
+  /// when it happened.
+  summary String
+
+  /// Optional before/after snapshots for the fields that changed. JSON because
+  /// the shape differs per entity; never queried by content.
+  before Json?
+  after  Json?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  /// "Everything that happened to this record" and "everything this person
+  /// did" are the two questions an audit ever gets asked.
+  @@index([entityType, entityId, createdAt])
+  @@index([actorId, createdAt])
+  @@index([action, createdAt])
+  @@map("audit_logs")
 }

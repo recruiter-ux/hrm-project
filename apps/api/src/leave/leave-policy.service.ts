@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { ProrationMethod, type LeaveTypePolicy, type Prisma } from '@prisma/client';
 
+import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { toDateOnly } from './working-days';
 
@@ -58,7 +59,10 @@ function isLeapYear(year: number): boolean {
 export class LeavePolicyService {
   private readonly logger = new Logger(LeavePolicyService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly audit: AuditService,
+  ) {}
 
   private num(value: Prisma.Decimal | number | null | undefined): number {
     if (value === null || value === undefined) return 0;
@@ -171,7 +175,7 @@ export class LeavePolicyService {
     }
 
     try {
-      return await this.prisma.$transaction(async (tx) => {
+      const created = await this.prisma.$transaction(async (tx) => {
         if (open) {
           const closeOn = new Date(effectiveFrom);
           closeOn.setUTCDate(closeOn.getUTCDate() - 1);
@@ -181,7 +185,7 @@ export class LeavePolicyService {
           });
         }
 
-        const created = await tx.leaveTypePolicy.create({
+        return tx.leaveTypePolicy.create({
           data: {
             leaveTypeId,
             quotaDays: input.quotaDays,
@@ -196,13 +200,33 @@ export class LeavePolicyService {
             updatedById: actorEmployeeId,
           },
         });
-
-        this.logger.log(
-          `Leave policy version created for ${leaveType.code}: ${input.quotaDays} days from ${effectiveFrom.toISOString().slice(0, 10)}`,
-        );
-
-        return this.shape(created);
       });
+
+      this.logger.log(
+        `Leave policy version created for ${leaveType.code}: ${input.quotaDays} days from ${effectiveFrom.toISOString().slice(0, 10)}`,
+      );
+
+      // Recorded after the commit, so a logging failure cannot roll back a
+      // policy change. The effective-dated rows are the business record; this
+      // is the "who pressed the button" trail beside it.
+      await this.audit.record({
+        actorId: actorEmployeeId,
+        action: 'leave_policy.version_created',
+        entityType: 'leave_type',
+        entityId: leaveTypeId,
+        summary: `New ${leaveType.name} policy: ${input.quotaDays} days from ${effectiveFrom.toISOString().slice(0, 10)}${open ? ` (previous version, ${this.num(open.quotaDays)} days, closed the day before)` : ''}`,
+        before: open
+          ? { quotaDays: this.num(open.quotaDays), effectiveFrom: open.effectiveFrom.toISOString() }
+          : null,
+        after: {
+          quotaDays: input.quotaDays,
+          minNoticeDays: input.minNoticeDays,
+          approvalRequired: input.approvalRequired,
+          effectiveFrom: effectiveFrom.toISOString(),
+        },
+      });
+
+      return this.shape(created);
     } catch (error) {
       // Last line of defence: the exclusion constraint caught something the
       // checks above missed (e.g. a concurrent request).
@@ -240,6 +264,27 @@ export class LeavePolicyService {
         updatedById: actorEmployeeId,
       },
     });
+
+    await this.audit.record({
+      actorId: actorEmployeeId,
+      action: 'leave_policy.version_amended',
+      entityType: 'leave_type',
+      entityId: existing.leaveTypeId,
+      summary: `Amended the policy version effective ${existing.effectiveFrom.toISOString().slice(0, 10)} (note and carry-forward cap only — the quota is unchanged at ${this.num(existing.quotaDays)} days)`,
+      before: {
+        notes: existing.notes,
+        carryForwardMaxDays: existing.carryForwardMaxDays
+          ? this.num(existing.carryForwardMaxDays)
+          : null,
+      },
+      after: {
+        notes: updated.notes,
+        carryForwardMaxDays: updated.carryForwardMaxDays
+          ? this.num(updated.carryForwardMaxDays)
+          : null,
+      },
+    });
+
     return this.shape(updated);
   }
 
@@ -314,9 +359,7 @@ export class LeavePolicyService {
       // effect within the year.
       entitledDays = this.num(policies[policies.length - 1].quotaDays);
     } else {
-      entitledDays = Number(
-        breakdown.reduce((sum, row) => sum + row.contribution, 0).toFixed(2),
-      );
+      entitledDays = Number(breakdown.reduce((sum, row) => sum + row.contribution, 0).toFixed(2));
     }
 
     return { year, method: leaveType.prorationMethod, entitledDays, breakdown };

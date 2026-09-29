@@ -87,8 +87,14 @@ export default function EmployeeDetailPage() {
           </p>
           <div className="mt-2 flex flex-wrap gap-2">
             <Badge value={employee.status} />
-            <Badge value={employee.employmentType} tone="bg-neutral-100 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300" />
-            <Badge value={employee.workLocationType} tone="bg-neutral-100 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300" />
+            <Badge
+              value={employee.employmentType}
+              tone="bg-neutral-100 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300"
+            />
+            <Badge
+              value={employee.workLocationType}
+              tone="bg-neutral-100 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300"
+            />
           </div>
         </div>
 
@@ -139,9 +145,7 @@ export default function EmployeeDetailPage() {
 
       {employee.reports.length > 0 && (
         <section>
-          <h2 className="mb-3 text-lg font-semibold">
-            Direct reports ({employee.reports.length})
-          </h2>
+          <h2 className="mb-3 text-lg font-semibold">Direct reports ({employee.reports.length})</h2>
           <ul className="divide-y divide-[var(--border)] rounded-lg border border-[var(--border)]">
             {employee.reports.map((report) => (
               <li key={report.id} className="px-4 py-3">
@@ -180,17 +184,16 @@ export default function EmployeeDetailPage() {
             </thead>
             <tbody>
               {employee.assignmentHistory.map((entry) => (
-                <tr
-                  key={entry.id}
-                  className="border-b border-[var(--border)] last:border-0"
-                >
+                <tr key={entry.id} className="border-b border-[var(--border)] last:border-0">
                   <td className="px-4 py-3 whitespace-nowrap">
                     {formatDate(entry.effectiveFrom)}
                     {' → '}
                     {entry.effectiveTo ? (
                       formatDate(entry.effectiveTo)
                     ) : (
-                      <span className="font-medium text-green-700 dark:text-green-400">current</span>
+                      <span className="font-medium text-green-700 dark:text-green-400">
+                        current
+                      </span>
                     )}
                   </td>
                   <td className="px-4 py-3">{entry.role.title}</td>

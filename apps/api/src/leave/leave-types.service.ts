@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { ProrationMethod } from '@prisma/client';
 
+import { AuditService } from '../audit/audit.service';
 import { PrismaService } from '../prisma/prisma.service';
 import type { CreateLeaveTypeDto, UpdateLeaveTypeDto } from './dto/leave.dto';
 import { LeavePolicyService } from './leave-policy.service';
@@ -24,6 +25,7 @@ export class LeaveTypesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly policies: LeavePolicyService,
+    private readonly audit: AuditService,
   ) {}
 
   /**
@@ -92,7 +94,9 @@ export class LeaveTypesService {
     if (existing) throw new ConflictException(`A leave type with code ${dto.code} already exists.`);
 
     const effectiveFrom = toDateOnly(
-      dto.effectiveFrom ? new Date(dto.effectiveFrom) : new Date(Date.UTC(new Date().getUTCFullYear(), 0, 1)),
+      dto.effectiveFrom
+        ? new Date(dto.effectiveFrom)
+        : new Date(Date.UTC(new Date().getUTCFullYear(), 0, 1)),
     );
 
     const created = await this.prisma.$transaction(async (tx) => {
@@ -126,6 +130,21 @@ export class LeaveTypesService {
       return type;
     });
 
+    await this.audit.record({
+      actorId: actorEmployeeId,
+      action: 'leave_type.created',
+      entityType: 'leave_type',
+      entityId: created.id,
+      summary: `Created leave type ${dto.name} (${dto.code}) with an opening policy of ${dto.quotaDays} days from ${effectiveFrom.toISOString().slice(0, 10)}`,
+      after: {
+        code: dto.code,
+        name: dto.name,
+        quotaDays: dto.quotaDays,
+        requiresBalance: dto.requiresBalance ?? true,
+        approvalRequired: dto.approvalRequired ?? true,
+      },
+    });
+
     return this.findOne(created.id);
   }
 
@@ -136,11 +155,11 @@ export class LeaveTypesService {
    * Quota, notice period, and the approval rule are NOT here: changing those
    * means creating a new policy version, so history survives.
    */
-  async update(id: string, dto: UpdateLeaveTypeDto) {
+  async update(id: string, dto: UpdateLeaveTypeDto, actorEmployeeId: string | null) {
     const existing = await this.prisma.leaveType.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException('Leave type not found.');
 
-    await this.prisma.leaveType.update({
+    const updated = await this.prisma.leaveType.update({
       where: { id },
       data: {
         ...(dto.name !== undefined && { name: dto.name }),
@@ -149,6 +168,30 @@ export class LeaveTypesService {
         ...(dto.requiresBalance !== undefined && { requiresBalance: dto.requiresBalance }),
         ...(dto.prorationMethod !== undefined && { prorationMethod: dto.prorationMethod }),
         ...(dto.isActive !== undefined && { isActive: dto.isActive }),
+      },
+    });
+
+    await this.audit.record({
+      actorId: actorEmployeeId,
+      action: 'leave_type.updated',
+      entityType: 'leave_type',
+      entityId: id,
+      summary: `Edited leave type ${existing.name} (${existing.code})${existing.name !== updated.name ? ` — renamed to ${updated.name}` : ''}`,
+      before: {
+        name: existing.name,
+        description: existing.description,
+        isPaid: existing.isPaid,
+        requiresBalance: existing.requiresBalance,
+        prorationMethod: existing.prorationMethod,
+        isActive: existing.isActive,
+      },
+      after: {
+        name: updated.name,
+        description: updated.description,
+        isPaid: updated.isPaid,
+        requiresBalance: updated.requiresBalance,
+        prorationMethod: updated.prorationMethod,
+        isActive: updated.isActive,
       },
     });
 
@@ -163,20 +206,42 @@ export class LeaveTypesService {
    * delete even if someone tried. Archiving hides it from the request form
    * while leaving every historical record intact and readable.
    */
-  async archive(id: string) {
+  async archive(id: string, actorEmployeeId: string | null) {
     const existing = await this.prisma.leaveType.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException('Leave type not found.');
     if (!existing.isActive) throw new BadRequestException('That leave type is already archived.');
 
     await this.prisma.leaveType.update({ where: { id }, data: { isActive: false } });
+
+    await this.audit.record({
+      actorId: actorEmployeeId,
+      action: 'leave_type.archived',
+      entityType: 'leave_type',
+      entityId: id,
+      summary: `Archived leave type ${existing.name} (${existing.code}) — it can no longer be requested, and existing records are untouched`,
+      before: { isActive: true },
+      after: { isActive: false },
+    });
+
     return this.findOne(id);
   }
 
-  async restore(id: string) {
+  async restore(id: string, actorEmployeeId: string | null) {
     const existing = await this.prisma.leaveType.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException('Leave type not found.');
 
     await this.prisma.leaveType.update({ where: { id }, data: { isActive: true } });
+
+    await this.audit.record({
+      actorId: actorEmployeeId,
+      action: 'leave_type.restored',
+      entityType: 'leave_type',
+      entityId: id,
+      summary: `Restored leave type ${existing.name} (${existing.code}) — it can be requested again`,
+      before: { isActive: false },
+      after: { isActive: true },
+    });
+
     return this.findOne(id);
   }
 }

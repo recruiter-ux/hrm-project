@@ -13,7 +13,7 @@ import {
   Spinner,
 } from '@/components/ui';
 import { api, ApiError } from '@/lib/api';
-import type { EntitlementResult, LeaveType, LeaveTypeDetail } from '@/lib/types';
+import type { AuditEntry, EntitlementResult, LeaveType, LeaveTypeDetail } from '@/lib/types';
 
 function fmt(date: string | null): string {
   if (!date) return 'current';
@@ -40,6 +40,7 @@ export default function LeavePolicySettingsPage() {
   const [types, setTypes] = useState<LeaveType[] | null>(null);
   const [selected, setSelected] = useState<LeaveTypeDetail | null>(null);
   const [entitlement, setEntitlement] = useState<EntitlementResult | null>(null);
+  const [audit, setAudit] = useState<AuditEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showCreateType, setShowCreateType] = useState(false);
@@ -58,12 +59,14 @@ export default function LeavePolicySettingsPage() {
   const loadDetail = useCallback(async (id: string) => {
     setError(null);
     try {
-      const [detail, ent] = await Promise.all([
+      const [detail, ent, log] = await Promise.all([
         api<LeaveTypeDetail>(`/api/leave/types/${id}`),
         api<EntitlementResult>(`/api/leave/types/${id}/entitlement?year=${CURRENT_YEAR}`),
+        api<AuditEntry[]>(`/api/leave/types/${id}/audit`),
       ]);
       setSelected(detail);
       setEntitlement(ent);
+      setAudit(log);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not load that leave type.');
     }
@@ -218,7 +221,10 @@ export default function LeavePolicySettingsPage() {
       {error && <ErrorBanner message={error} />}
 
       {showCreateType && canManage && (
-        <form onSubmit={createType} className="space-y-4 rounded-lg border border-[var(--border)] p-5">
+        <form
+          onSubmit={createType}
+          className="space-y-4 rounded-lg border border-[var(--border)] p-5"
+        >
           <h2 className="font-semibold">New leave type</h2>
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Code" required hint="Upper case, e.g. CASUAL. Never changes.">
@@ -353,7 +359,8 @@ export default function LeavePolicySettingsPage() {
                       <div className="text-xs text-[var(--muted)]">
                         {type.code}
                         {!type.requiresBalance && ' · no balance needed'}
-                        {type.currentPolicy && !type.currentPolicy.approvalRequired &&
+                        {type.currentPolicy &&
+                          !type.currentPolicy.approvalRequired &&
                           ' · auto-approves'}
                       </div>
                     </td>
@@ -524,6 +531,43 @@ export default function LeavePolicySettingsPage() {
                     <li key={row.policyId}>
                       {row.from} to {row.to}: {row.quotaDays} days × {row.daysInPeriod} days ={' '}
                       <strong>{row.contribution}</strong>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* The audit trail. Distinct from Policy history above, and the
+                difference matters: history is the RULES over time, this is
+                WHO CHANGED THEM. One is business data, the other is
+                accountability. */}
+            {audit && audit.length > 0 && (
+              <div>
+                <h3 className="mb-2 font-medium">Change log</h3>
+                <p className="mb-2 text-xs text-[var(--muted)]">
+                  Who changed this leave type, and when. Recorded automatically; nothing here can be
+                  edited.
+                </p>
+                <ul className="divide-y divide-[var(--border)] rounded-md border border-[var(--border)]">
+                  {audit.map((entry) => (
+                    <li key={entry.id} className="px-4 py-2.5 text-xs">
+                      <div className="flex flex-wrap items-baseline justify-between gap-2">
+                        <span className="font-medium">
+                          {entry.actor
+                            ? `${entry.actor.firstName} ${entry.actor.lastName}`
+                            : 'System'}
+                        </span>
+                        <span className="text-[var(--muted)]">
+                          {new Date(entry.createdAt).toLocaleString(undefined, {
+                            day: 'numeric',
+                            month: 'short',
+                            year: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })}
+                        </span>
+                      </div>
+                      <p className="mt-0.5 text-[var(--muted)]">{entry.summary}</p>
                     </li>
                   ))}
                 </ul>

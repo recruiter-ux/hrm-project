@@ -4,6 +4,12 @@ import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 
 import { useAuth } from '@/components/auth-provider';
+import {
+  DeepLinkNotice,
+  highlightClass,
+  useDeepLinkTarget,
+  useScrollToTarget,
+} from '@/components/deep-link';
 import { formatDateRange, LeaveStatusBadge } from '@/components/leave-status-badge';
 import { buttonClass, EmptyState, ErrorBanner, Spinner } from '@/components/ui';
 import { api, ApiError } from '@/lib/api';
@@ -32,9 +38,7 @@ export default function MyLeavePage() {
     try {
       const [b, r] = await Promise.all([
         api<LeaveBalancesResponse>('/api/leave/balances'),
-        api<LeaveRequestsResponse>(
-          `/api/leave/requests?employeeId=${myEmployeeId}&pageSize=100`,
-        ),
+        api<LeaveRequestsResponse>(`/api/leave/requests?employeeId=${myEmployeeId}&pageSize=100`),
       ]);
       setBalances(b);
       setRequests(r);
@@ -46,6 +50,10 @@ export default function MyLeavePage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Arriving from a notification about one specific request.
+  const target = useDeepLinkTarget();
+  useScrollToTarget(target, requests);
 
   async function cancel(id: string) {
     if (!window.confirm('Withdraw this leave request?')) return;
@@ -87,6 +95,8 @@ export default function MyLeavePage() {
           </Link>
         )}
       </div>
+
+      <DeepLinkNotice target={target} label="leave request" />
 
       {error && <ErrorBanner message={error} onRetry={() => void load()} />}
       {!balances && !error && <Spinner />}
@@ -132,9 +142,7 @@ export default function MyLeavePage() {
                         terms, rather than an unexplained fractional number. */}
                     {b.entitlementBreakdown.length > 1 && (
                       <details className="mt-2 text-xs text-[var(--muted)]">
-                        <summary className="cursor-pointer">
-                          Quota changed during {b.year}
-                        </summary>
+                        <summary className="cursor-pointer">Quota changed during {b.year}</summary>
                         <ul className="mt-1 space-y-0.5">
                           {b.entitlementBreakdown.map((row) => (
                             <li key={row.policyId}>
@@ -182,7 +190,11 @@ export default function MyLeavePage() {
                     req.status === 'PENDING' ||
                     (req.status === 'APPROVED' && new Date(req.startDate) > new Date());
                   return (
-                    <tr key={req.id} className="border-b border-[var(--border)] last:border-0">
+                    <tr
+                      key={req.id}
+                      id={`record-${req.id}`}
+                      className={`border-b border-[var(--border)] last:border-0 ${highlightClass(req.id, target)}`}
+                    >
                       <td className="px-4 py-3 whitespace-nowrap">
                         {formatDateRange(req.startDate, req.endDate)}
                         <div className="text-xs text-[var(--muted)]">{req.reason}</div>
@@ -194,7 +206,9 @@ export default function MyLeavePage() {
                       </td>
                       <td className="px-4 py-3 text-xs text-[var(--muted)]">
                         {req.status === 'PENDING' && req.approver && (
-                          <>with {req.approver.firstName} {req.approver.lastName}</>
+                          <>
+                            with {req.approver.firstName} {req.approver.lastName}
+                          </>
                         )}
                         {req.status === 'PENDING' && !req.approver && (
                           <span className="text-amber-700 dark:text-amber-400">

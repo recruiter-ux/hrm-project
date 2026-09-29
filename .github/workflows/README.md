@@ -1,8 +1,8 @@
 # GitHub Actions workflows
 
-| File     | Trigger                                | What it does           |
-| -------- | -------------------------------------- | ---------------------- |
-| `ci.yml` | Push / PR to `main`, or run by hand     | Lint, format, and build |
+| File     | Trigger                             | What it does            |
+| -------- | ----------------------------------- | ----------------------- |
+| `ci.yml` | Push / PR to `main`, or run by hand | Lint, format, and build |
 
 ## Things worth knowing
 

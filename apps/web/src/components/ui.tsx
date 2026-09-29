@@ -51,7 +51,10 @@ const STATUS_STYLES: Record<string, string> = {
 };
 
 export function Badge({ value, tone }: { value: string; tone?: string }) {
-  const style = tone ?? STATUS_STYLES[value] ?? 'bg-neutral-100 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300';
+  const style =
+    tone ??
+    STATUS_STYLES[value] ??
+    'bg-neutral-100 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300';
   return (
     <span className={`inline-block rounded px-2 py-0.5 text-xs font-medium ${style}`}>
       {value.replace(/_/g, ' ').toLowerCase()}

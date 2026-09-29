@@ -5,6 +5,7 @@ import { usePathname, useRouter } from 'next/navigation';
 import { useEffect } from 'react';
 
 import { useAuth } from '@/components/auth-provider';
+import { NotificationBell } from '@/components/notification-bell';
 import { Spinner } from '@/components/ui';
 
 /**
@@ -83,6 +84,9 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           </nav>
 
           <div className="ml-auto flex items-center gap-3 text-sm">
+            {/* Shown to everyone with an employee record — notifications are
+                addressed to a person, so there is no permission to check. */}
+            {employee && <NotificationBell />}
             <div className="text-right">
               <div className="font-medium">{displayName}</div>
               <div className="text-xs text-[var(--muted)]" title="Your AccessRoles">

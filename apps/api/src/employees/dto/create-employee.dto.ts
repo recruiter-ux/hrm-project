@@ -34,7 +34,8 @@ export class CreateEmployeeDto {
   @MaxLength(255)
   workEmail!: string;
 
-  @IsOptional() @IsEmail({}, { message: 'personalEmail must be a valid email address.' })
+  @IsOptional()
+  @IsEmail({}, { message: 'personalEmail must be a valid email address.' })
   @MaxLength(255)
   personalEmail?: string;
 

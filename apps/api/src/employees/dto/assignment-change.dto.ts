@@ -1,12 +1,5 @@
 import { AssignmentChangeReason, EmploymentType, WorkLocationType } from '@prisma/client';
-import {
-  IsDateString,
-  IsEnum,
-  IsOptional,
-  IsString,
-  MaxLength,
-  ValidateIf,
-} from 'class-validator';
+import { IsDateString, IsEnum, IsOptional, IsString, MaxLength, ValidateIf } from 'class-validator';
 
 /**
  * A change to someone's employment arrangement.

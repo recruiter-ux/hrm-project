@@ -199,6 +199,20 @@ export class CreateLeaveRequestDto {
   @IsOptional() @IsString() employeeId?: string;
 }
 
+/**
+ * The request form's live "how many days is this?" preview.
+ *
+ * Deliberately server-side: the browser must not have its own copy of the
+ * working-day rules, or the preview and the stored figure could disagree.
+ */
+export class WorkingDaysDto {
+  @IsDateString({}, { message: 'startDate must be a date, e.g. 2026-10-05.' })
+  startDate!: string;
+
+  @IsDateString({}, { message: 'endDate must be a date, e.g. 2026-10-09.' })
+  endDate!: string;
+}
+
 export class DecideLeaveRequestDto {
   @IsOptional()
   @IsString()

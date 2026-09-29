@@ -8,6 +8,8 @@ import {
 } from '@nestjs/common';
 import { LeaveRequestStatus, PermissionScope, type Prisma } from '@prisma/client';
 
+import { AuditService } from '../audit/audit.service';
+import { NotificationService } from '../notifications/notification.service';
 import { PermissionsService } from '../permissions/permissions.service';
 import { PrismaService } from '../prisma/prisma.service';
 import type {
@@ -17,6 +19,7 @@ import type {
   SetBalanceDto,
 } from './dto/leave.dto';
 import { LeavePolicyService, type EntitlementBreakdownRow } from './leave-policy.service';
+import * as LeaveNotifications from './leave-notifications';
 import { countWorkingDays, formatDate, leaveYearOf, toDateOnly } from './working-days';
 
 /** Statuses that consume entitlement and block overlapping dates. */
@@ -24,6 +27,14 @@ const ACTIVE_STATUSES: LeaveRequestStatus[] = [
   LeaveRequestStatus.PENDING,
   LeaveRequestStatus.APPROVED,
 ];
+
+/**
+ * Someone in one of these states cannot be asked to approve leave: they have
+ * left, or their access is suspended pending something. ON_LEAVE and
+ * NOTICE_PERIOD are deliberately NOT here — a manager on a week's holiday is
+ * still the right approver, and escalating past them would be surprising.
+ */
+const INELIGIBLE_APPROVER_STATUSES = ['TERMINATED', 'SUSPENDED'] as const;
 
 const REQUEST_INCLUDE = {
   employee: {
@@ -55,6 +66,22 @@ export interface BalanceSummary {
   entitlementBreakdown: EntitlementBreakdownRow[];
 }
 
+/** Where an approver came from, so the UI and the audit can explain it. */
+export type ApproverSource = 'MANAGER' | 'DEPARTMENT_HEAD' | 'NONE';
+
+export interface ApproverResolution {
+  approverId: string | null;
+  source: ApproverSource;
+  /** Plain-English explanation, shown to the employee when nobody was found. */
+  note: string | null;
+}
+
+/**
+ * Prisma's transaction client. Balance arithmetic runs against either this or
+ * the plain service, depending on whether it is inside the concurrency lock.
+ */
+type DbClient = Prisma.TransactionClient | PrismaService;
+
 @Injectable()
 export class LeaveService {
   private readonly logger = new Logger(LeaveService.name);
@@ -63,6 +90,8 @@ export class LeaveService {
     private readonly prisma: PrismaService,
     private readonly permissions: PermissionsService,
     private readonly policies: LeavePolicyService,
+    private readonly notifications: NotificationService,
+    private readonly audit: AuditService,
   ) {}
 
   private num(value: Prisma.Decimal | number | null | undefined): number {
@@ -92,7 +121,78 @@ export class LeaveService {
   //
   // Used, pending, and remaining are likewise DERIVED by summing requests, so
   // cancelling a request frees its days with nothing to un-deduct.
+  //
+  // ⚠️ ONE CALCULATION, ONE PLACE. `computeBalance` below is the only code
+  // that works out what someone has left. The balances screen, the submission
+  // check, and the approval re-check all call it, so they cannot drift apart
+  // and disagree about whether a request fits.
   // ---------------------------------------------------------------------------
+
+  /**
+   * One leave type, one employee, one year — the whole picture.
+   *
+   * Takes a database client so it can run either normally or inside the
+   * per-employee lock taken during submission.
+   */
+  private async computeBalance(
+    db: DbClient,
+    employeeId: string,
+    type: { id: string; code: string; name: string; requiresBalance: boolean },
+    year: number,
+  ): Promise<BalanceSummary> {
+    const [override, requests, calculated] = await Promise.all([
+      db.leaveBalance.findUnique({
+        where: {
+          employeeId_leaveTypeId_year: { employeeId, leaveTypeId: type.id, year },
+        },
+      }),
+      db.leaveRequest.findMany({
+        where: {
+          employeeId,
+          leaveTypeId: type.id,
+          status: { in: ACTIVE_STATUSES },
+          startDate: {
+            gte: new Date(Date.UTC(year, 0, 1)),
+            lte: new Date(Date.UTC(year, 11, 31)),
+          },
+        },
+        select: { days: true, status: true },
+      }),
+      this.policies.calculateEntitlement(type.id, year),
+    ]);
+
+    const usedDays = requests
+      .filter((r) => r.status === LeaveRequestStatus.APPROVED)
+      .reduce((sum, r) => sum + this.num(r.days), 0);
+    const pendingDays = requests
+      .filter((r) => r.status === LeaveRequestStatus.PENDING)
+      .reduce((sum, r) => sum + this.num(r.days), 0);
+
+    const isOverridden =
+      override?.entitlementOverrideDays !== null && override?.entitlementOverrideDays !== undefined;
+
+    const entitledDays = isOverridden
+      ? this.num(override.entitlementOverrideDays)
+      : calculated.entitledDays;
+    const carriedForwardDays = this.num(override?.carriedForwardDays);
+
+    return {
+      leaveTypeId: type.id,
+      code: type.code,
+      name: type.name,
+      requiresBalance: type.requiresBalance,
+      year,
+      entitledDays,
+      isOverridden,
+      carriedForwardDays,
+      usedDays,
+      pendingDays,
+      remainingDays: Number(
+        (entitledDays + carriedForwardDays - usedDays - pendingDays).toFixed(2),
+      ),
+      entitlementBreakdown: isOverridden ? [] : calculated.breakdown,
+    };
+  }
 
   async getBalances(
     callerEmployeeId: string | null,
@@ -104,77 +204,29 @@ export class LeaveService {
     await this.assertEmployeeVisible(callerEmployeeId, scope, employeeId);
 
     const year = query.year ?? new Date().getUTCFullYear();
-
-    const [types, overrides, requests] = await Promise.all([
-      this.prisma.leaveType.findMany({ where: { isActive: true }, orderBy: { name: 'asc' } }),
-      this.prisma.leaveBalance.findMany({ where: { employeeId, year } }),
-      this.prisma.leaveRequest.findMany({
-        where: {
-          employeeId,
-          status: { in: ACTIVE_STATUSES },
-          startDate: {
-            gte: new Date(Date.UTC(year, 0, 1)),
-            lte: new Date(Date.UTC(year, 11, 31)),
-          },
-        },
-        select: { leaveTypeId: true, days: true, status: true },
-      }),
-    ]);
-
-    const overrideByType = new Map(overrides.map((b) => [b.leaveTypeId, b]));
+    const types = await this.prisma.leaveType.findMany({
+      where: { isActive: true },
+      orderBy: { name: 'asc' },
+    });
 
     const balances = await Promise.all(
-      types.map(async (type) => {
-        const forType = requests.filter((r) => r.leaveTypeId === type.id);
-        const usedDays = forType
-          .filter((r) => r.status === LeaveRequestStatus.APPROVED)
-          .reduce((sum, r) => sum + this.num(r.days), 0);
-        const pendingDays = forType
-          .filter((r) => r.status === LeaveRequestStatus.PENDING)
-          .reduce((sum, r) => sum + this.num(r.days), 0);
-
-        const calculated = await this.policies.calculateEntitlement(type.id, year);
-        const override = overrideByType.get(type.id);
-        const isOverridden =
-          override?.entitlementOverrideDays !== null &&
-          override?.entitlementOverrideDays !== undefined;
-
-        const entitledDays = isOverridden
-          ? this.num(override.entitlementOverrideDays)
-          : calculated.entitledDays;
-
-        const carriedForwardDays = this.num(override?.carriedForwardDays);
-
-        return {
-          leaveTypeId: type.id,
-          code: type.code,
-          name: type.name,
-          requiresBalance: type.requiresBalance,
-          year,
-          entitledDays,
-          isOverridden,
-          carriedForwardDays,
-          usedDays,
-          pendingDays,
-          remainingDays: Number(
-            (entitledDays + carriedForwardDays - usedDays - pendingDays).toFixed(2),
-          ),
-          entitlementBreakdown: isOverridden ? [] : calculated.breakdown,
-        };
-      }),
+      types.map((type) => this.computeBalance(this.prisma, employeeId, type, year)),
     );
 
     return { employeeId, year, balances };
   }
 
   /** HR records a per-employee deviation from the policy. */
-  async setBalance(dto: SetBalanceDto) {
+  async setBalance(dto: SetBalanceDto, actorEmployeeId: string | null) {
     const [employee, leaveType] = await Promise.all([
       this.prisma.employee.findFirst({
         where: { id: dto.employeeId, deletedAt: null },
-        select: { id: true },
+        select: { id: true, firstName: true, lastName: true },
       }),
-      this.prisma.leaveType.findUnique({ where: { id: dto.leaveTypeId }, select: { id: true } }),
+      this.prisma.leaveType.findUnique({
+        where: { id: dto.leaveTypeId },
+        select: { id: true, name: true },
+      }),
     ]);
     if (!employee) throw new BadRequestException('That employee does not exist.');
     if (!leaveType) throw new BadRequestException('That leave type does not exist.');
@@ -202,18 +254,27 @@ export class LeaveService {
       },
     });
 
+    await this.audit.record({
+      actorId: actorEmployeeId,
+      action: 'leave_balance.set',
+      entityType: 'leave_balance',
+      entityId: balance.id,
+      summary:
+        `Set ${leaveType.name} ${dto.year} for ${employee.firstName} ${employee.lastName}: ` +
+        `entitlement override ${data.entitlementOverrideDays ?? 'none'}, carried forward ${data.carriedForwardDays}`,
+      after: data as Prisma.InputJsonValue,
+    });
+
     return {
       ...balance,
       entitlementOverrideDays:
-        balance.entitlementOverrideDays === null
-          ? null
-          : this.num(balance.entitlementOverrideDays),
+        balance.entitlementOverrideDays === null ? null : this.num(balance.entitlementOverrideDays),
       carriedForwardDays: this.num(balance.carriedForwardDays),
     };
   }
 
   // ---------------------------------------------------------------------------
-  // Requests
+  // Approver resolution
   // ---------------------------------------------------------------------------
 
   /**
@@ -227,21 +288,63 @@ export class LeaveService {
    * `LeaveRequest.approverId` still records who was originally asked — that is
    * audit, not authorisation.
    *
-   * Falls back to the department head so a direct report of the CEO is not
-   * stranded. Null is still possible (the CEO's own request), in which case
-   * only someone with wider scope — HR — can decide it.
+   * THE EDGE CASES, AND WHAT HAPPENS IN EACH:
+   *
+   *   manager set, still employed      → the manager
+   *   manager left / suspended         → fall through to the department head
+   *   manager is the employee          → fall through (nobody approves
+   *                                       themselves, even by accident)
+   *   no manager (CEO's report)        → the department head
+   *   head also unavailable or is them → NONE, and HR is notified
+   *
+   * ⚠️ NONE NEVER MEANS "APPROVE IT ANYWAY". The request stays PENDING, the
+   * employee is told plainly that it went to HR, and HR is notified. Silently
+   * approving something nobody agreed to would be the worst possible answer.
    */
-  private async resolveCurrentApprover(employeeId: string): Promise<string | null> {
+  async resolveApprover(employeeId: string): Promise<ApproverResolution> {
     const assignment = await this.prisma.employmentAssignment.findFirst({
       where: { employeeId, effectiveTo: null },
-      select: { managerId: true, department: { select: { headEmployeeId: true } } },
+      select: {
+        managerId: true,
+        department: { select: { headEmployeeId: true } },
+      },
     });
 
-    if (assignment?.managerId) return assignment.managerId;
+    const candidates: Array<{ id: string | null; source: ApproverSource }> = [
+      { id: assignment?.managerId ?? null, source: 'MANAGER' },
+      { id: assignment?.department?.headEmployeeId ?? null, source: 'DEPARTMENT_HEAD' },
+    ];
 
-    const head = assignment?.department?.headEmployeeId ?? null;
-    return head && head !== employeeId ? head : null;
+    let sawIneligible = false;
+
+    for (const candidate of candidates) {
+      if (!candidate.id || candidate.id === employeeId) continue;
+
+      const person = await this.prisma.employee.findFirst({
+        where: {
+          id: candidate.id,
+          deletedAt: null,
+          status: { notIn: [...INELIGIBLE_APPROVER_STATUSES] },
+        },
+        select: { id: true },
+      });
+
+      if (person) return { approverId: person.id, source: candidate.source, note: null };
+      sawIneligible = true;
+    }
+
+    return {
+      approverId: null,
+      source: 'NONE',
+      note: sawIneligible
+        ? 'The manager on file has left the company or is suspended.'
+        : 'This employee has no manager and no department head on file.',
+    };
   }
+
+  // ---------------------------------------------------------------------------
+  // Requests
+  // ---------------------------------------------------------------------------
 
   async listRequests(
     callerEmployeeId: string | null,
@@ -261,14 +364,29 @@ export class LeaveService {
     // The manager's queue: pending requests from people whose CURRENT manager
     // is the caller. Resolved from the live reporting line, not the stored
     // approverId, so a manager change re-routes the queue automatically.
+    //
+    // Someone with wider approval rights (HR at GLOBAL scope) additionally
+    // sees requests that could not be routed to anyone — otherwise the
+    // notification they receive would lead to an empty screen.
     if (query.awaitingMyDecision) {
       if (!callerEmployeeId) return this.emptyPage(query);
+
+      const queueFilters: Prisma.LeaveRequestWhereInput[] = [
+        {
+          employee: {
+            is: { assignments: { some: { effectiveTo: null, managerId: callerEmployeeId } } },
+          },
+        },
+      ];
+
+      if (scope === PermissionScope.GLOBAL) {
+        queueFilters.push({ approverId: null });
+      }
+
       filters.push({
         status: LeaveRequestStatus.PENDING,
         employeeId: { not: callerEmployeeId },
-        employee: {
-          is: { assignments: { some: { effectiveTo: null, managerId: callerEmployeeId } } },
-        },
+        OR: queueFilters,
       });
     }
 
@@ -302,9 +420,7 @@ export class LeaveService {
     return {
       ...item,
       days: this.num(item.days),
-      appliedPolicy: policy
-        ? { ...policy, quotaDays: this.num(policy.quotaDays) }
-        : null,
+      appliedPolicy: policy ? { ...policy, quotaDays: this.num(policy.quotaDays) } : null,
     };
   }
 
@@ -331,13 +447,37 @@ export class LeaveService {
   }
 
   /**
+   * Working days in a range, for the request form's live preview.
+   *
+   * Exists so the browser never counts days itself. The number a person sees
+   * before submitting is produced by the SAME function that stores it, which
+   * is what stops the preview and the saved record disagreeing — and keeps
+   * being true on the day a public-holiday calendar lands.
+   */
+  calculateDays(startDate: string, endDate: string) {
+    const start = toDateOnly(new Date(startDate));
+    const end = toDateOnly(new Date(endDate));
+
+    if (end < start) {
+      return { startDate: formatDate(start), endDate: formatDate(end), days: 0, valid: false };
+    }
+
+    return {
+      startDate: formatDate(start),
+      endDate: formatDate(end),
+      days: countWorkingDays(start, end),
+      valid: true,
+    };
+  }
+
+  /**
    * Submits a request.
    *
    * Validation runs cheapest-and-clearest first, so the message a person sees
    * is the most useful one:
    *   1. the leave type is active
-   *   2. a policy exists for the requested dates
-   *   3. end date not before start date
+   *   2. end date not before start date
+   *   3. a policy exists for the requested dates
    *   4. at least one working day in the range
    *   5. the policy's minimum notice period is satisfied
    *   6. no overlap with an existing request
@@ -345,6 +485,8 @@ export class LeaveService {
    *
    * The POLICY IN FORCE ON THE START DATE governs — not today's policy. A
    * request for next March is judged by March's rules.
+   *
+   * ⚠️ STEPS 6 AND 7 ARE REPEATED INSIDE A LOCK. See `submitUnderLock`.
    */
   async createRequest(
     callerEmployeeId: string | null,
@@ -372,12 +514,12 @@ export class LeaveService {
     const startDate = toDateOnly(new Date(dto.startDate));
     const endDate = toDateOnly(new Date(dto.endDate));
 
-    // --- 3. dates -------------------------------------------------------------
+    // --- 2. dates -------------------------------------------------------------
     if (endDate < startDate) {
       throw new BadRequestException('The end date cannot be before the start date.');
     }
 
-    // --- 2. a policy covers these dates ---------------------------------------
+    // --- 3. a policy covers these dates ---------------------------------------
     const policy = await this.policies.getPolicyOn(leaveType.id, startDate);
     if (!policy) {
       throw new BadRequestException(
@@ -407,70 +549,209 @@ export class LeaveService {
       }
     }
 
-    // --- 6. overlap -----------------------------------------------------------
-    const clash = await this.prisma.leaveRequest.findFirst({
-      where: {
-        employeeId,
-        status: { in: ACTIVE_STATUSES },
-        startDate: { lte: endDate },
-        endDate: { gte: startDate },
-      },
-      include: { leaveType: { select: { name: true } } },
-    });
-
-    if (clash) {
-      throw new ConflictException(
-        `This overlaps an existing ${clash.status.toLowerCase()} request (${clash.leaveType.name}, ${formatDate(clash.startDate)} to ${formatDate(clash.endDate)}).`,
-      );
-    }
-
-    // --- 7. balance -----------------------------------------------------------
-    if (leaveType.requiresBalance) {
-      const year = leaveYearOf(startDate);
-      const summary = await this.getBalances(callerEmployeeId, scope, { employeeId, year });
-      const forType = summary.balances.find((b) => b.leaveTypeId === leaveType.id);
-      const remaining = forType?.remainingDays ?? 0;
-
-      if (days > remaining) {
-        throw new BadRequestException(
-          `Not enough ${leaveType.name} left: this request is ${days} day${days === 1 ? '' : 's'} but only ${remaining} remain${remaining === 1 ? 's' : ''} for ${year}. Pending requests already reserve part of the balance.`,
-        );
-      }
-    }
-
     // --- route or auto-approve ------------------------------------------------
-    const approverId = await this.resolveCurrentApprover(employeeId);
-
-    // When the policy says no approval is needed, the request is APPROVED on
-    // submission and flagged, so a report can tell "nobody needed to agree"
-    // apart from "a person agreed".
+    const approval = await this.resolveApprover(employeeId);
     const autoApprove = !policy.approvalRequired;
 
-    const created = await this.prisma.leaveRequest.create({
-      data: {
-        employeeId,
-        leaveTypeId: leaveType.id,
-        startDate,
-        endDate,
-        days,
-        reason: dto.reason.trim(),
-        status: autoApprove ? LeaveRequestStatus.APPROVED : LeaveRequestStatus.PENDING,
-        approverId,
-        appliedPolicyId: policy.id,
-        autoApproved: autoApprove,
-        decidedAt: autoApprove ? new Date() : null,
-        decisionComment: autoApprove
-          ? `Automatically approved — ${leaveType.name} does not require approval.`
-          : null,
-      },
-      include: REQUEST_INCLUDE,
+    // --- 6 and 7, then the insert, all under one lock -------------------------
+    const created = await this.submitUnderLock({
+      employeeId,
+      leaveType,
+      policyId: policy.id,
+      startDate,
+      endDate,
+      days,
+      reason: dto.reason.trim(),
+      approverId: approval.approverId,
+      autoApprove,
     });
 
+    // --- everything below happens AFTER the transaction has committed ---------
+    // A notification about a change that then rolled back would be a lie, and
+    // a mail server must never be able to undo an approved request.
+    await this.announceSubmission(created, approval, autoApprove);
+
     this.logger.log(
-      `Leave requested by ${employeeId} (${days}d ${leaveType.code}) — ${autoApprove ? 'auto-approved' : `routed to ${approverId ?? 'nobody'}`}`,
+      `Leave requested by ${employeeId} (${days}d ${leaveType.code}) — ${
+        autoApprove ? 'auto-approved' : `routed to ${approval.approverId ?? 'HR (no approver)'}`
+      }`,
     );
 
-    return this.shapeRequest(created);
+    return {
+      ...this.shapeRequest(created),
+      /** Tells the employee where it went, including when the answer is "HR". */
+      routing: { source: approval.source, note: approval.note },
+    };
+  }
+
+  /**
+   * =========================================================================
+   * THE CONCURRENCY GUARD
+   *
+   * The problem: someone with 2 days left clicks Submit twice in the same
+   * instant, or has two browser tabs open. Both requests read "2 days
+   * remaining", both pass validation, and both are written — 4 days are taken
+   * from a 2-day balance. Checking-then-writing is never safe on its own.
+   *
+   * The fix: `SELECT ... FOR UPDATE` on the employee's own row. Postgres hands
+   * that lock to one transaction at a time, so the second submission waits,
+   * then re-reads a balance that already includes the first request and is
+   * correctly rejected.
+   *
+   * WHY LOCK THE EMPLOYEE ROW rather than the leave requests: there is no row
+   * to lock for a request that does not exist yet. The employee is the thing
+   * both submissions have in common, and locking it serialises exactly the
+   * people who are competing — one person's submissions queue behind each
+   * other, and everyone else is unaffected.
+   *
+   * The overlap and balance checks are repeated in here deliberately. The
+   * copies outside the lock are not redundant: they produce a fast, friendly
+   * error in the ordinary case without paying for a lock.
+   * =========================================================================
+   */
+  private async submitUnderLock(input: {
+    employeeId: string;
+    leaveType: { id: string; code: string; name: string; requiresBalance: boolean };
+    policyId: string;
+    startDate: Date;
+    endDate: Date;
+    days: number;
+    reason: string;
+    approverId: string | null;
+    autoApprove: boolean;
+  }) {
+    const { employeeId, leaveType, startDate, endDate, days } = input;
+
+    return this.prisma.$transaction(async (tx) => {
+      // Take the lock. Nothing is read from the result — the point is the wait.
+      await tx.$queryRaw`SELECT id FROM employees WHERE id = ${employeeId} FOR UPDATE`;
+
+      // --- 6. overlap ---------------------------------------------------------
+      const clash = await tx.leaveRequest.findFirst({
+        where: {
+          employeeId,
+          status: { in: ACTIVE_STATUSES },
+          startDate: { lte: endDate },
+          endDate: { gte: startDate },
+        },
+        include: { leaveType: { select: { name: true } } },
+      });
+
+      if (clash) {
+        throw new ConflictException(
+          `This overlaps an existing ${clash.status.toLowerCase()} request (${clash.leaveType.name}, ${formatDate(clash.startDate)} to ${formatDate(clash.endDate)}).`,
+        );
+      }
+
+      // --- 7. balance ---------------------------------------------------------
+      if (leaveType.requiresBalance) {
+        const year = leaveYearOf(startDate);
+        const balance = await this.computeBalance(tx, employeeId, leaveType, year);
+
+        if (days > balance.remainingDays) {
+          throw new BadRequestException(
+            `Not enough ${leaveType.name} left: this request is ${days} day${days === 1 ? '' : 's'} but only ${balance.remainingDays} remain${balance.remainingDays === 1 ? 's' : ''} for ${year}. Pending requests already reserve part of the balance.`,
+          );
+        }
+      }
+
+      return tx.leaveRequest.create({
+        data: {
+          employeeId,
+          leaveTypeId: leaveType.id,
+          startDate,
+          endDate,
+          days,
+          reason: input.reason,
+          status: input.autoApprove ? LeaveRequestStatus.APPROVED : LeaveRequestStatus.PENDING,
+          approverId: input.approverId,
+          appliedPolicyId: input.policyId,
+          autoApproved: input.autoApprove,
+          decidedAt: input.autoApprove ? new Date() : null,
+          decisionComment: input.autoApprove
+            ? `Automatically approved — ${leaveType.name} does not require approval.`
+            : null,
+        },
+        include: REQUEST_INCLUDE,
+      });
+    });
+  }
+
+  /** Audit and notifications for a freshly created request. */
+  private async announceSubmission(
+    request: Prisma.LeaveRequestGetPayload<{ include: typeof REQUEST_INCLUDE }>,
+    approval: ApproverResolution,
+    autoApproved: boolean,
+  ): Promise<void> {
+    const ctx = this.contextOf(request);
+
+    await this.audit.record({
+      actorId: request.employeeId,
+      action: autoApproved ? 'leave_request.auto_approved' : 'leave_request.created',
+      entityType: 'leave_request',
+      entityId: request.id,
+      summary: autoApproved
+        ? `${ctx.employeeName} took ${ctx.days} day(s) ${ctx.leaveTypeName} (${LeaveNotifications.formatDateRange(ctx.startDate, ctx.endDate)}) — auto-approved, no approval required`
+        : `${ctx.employeeName} requested ${ctx.days} day(s) ${ctx.leaveTypeName} (${LeaveNotifications.formatDateRange(ctx.startDate, ctx.endDate)}) — routed to ${approval.source.toLowerCase().replace('_', ' ')}`,
+      after: { status: request.status, approverId: approval.approverId, source: approval.source },
+    });
+
+    // E. No approval needed — tell the employee, and nobody else. There is no
+    // manager action to prompt.
+    if (autoApproved) {
+      await this.notifications.notify(
+        LeaveNotifications.autoApprovedToEmployee(request.employeeId, ctx),
+      );
+      return;
+    }
+
+    // A. The ordinary path — tell the person who has to decide.
+    if (approval.approverId) {
+      await this.notifications.notify(
+        LeaveNotifications.submittedToApprover(approval.approverId, ctx),
+      );
+      return;
+    }
+
+    // A′. Nobody to ask. The request stays PENDING; HR is told so it does not
+    // sit unnoticed.
+    const hr = await this.permissions.findEmployeesWithPermissionAtScope(
+      'leave_request:approve',
+      PermissionScope.GLOBAL,
+    );
+
+    if (hr.length === 0) {
+      this.logger.warn(
+        `Leave request ${request.id} has no approver and nobody holds leave_request:approve at GLOBAL scope. It will sit unactioned.`,
+      );
+      return;
+    }
+
+    await this.notifications.notifyMany(
+      hr
+        .filter((hrId) => hrId !== request.employeeId)
+        .map((hrId) =>
+          LeaveNotifications.unroutedToHr(
+            hrId,
+            ctx,
+            approval.note ?? 'No approver could be found.',
+          ),
+        ),
+    );
+  }
+
+  private contextOf(
+    request: Prisma.LeaveRequestGetPayload<{ include: typeof REQUEST_INCLUDE }>,
+  ): LeaveNotifications.LeaveNotificationContext {
+    return {
+      requestId: request.id,
+      employeeName: `${request.employee.firstName} ${request.employee.lastName}`,
+      leaveTypeName: request.leaveType.name,
+      startDate: request.startDate,
+      endDate: request.endDate,
+      days: this.num(request.days),
+      reason: request.reason,
+    };
   }
 
   /**
@@ -497,7 +778,9 @@ export class LeaveService {
 
     const request = await this.prisma.leaveRequest.findUnique({
       where: { id },
-      include: { leaveType: { select: { name: true, requiresBalance: true } } },
+      include: {
+        leaveType: { select: { id: true, code: true, name: true, requiresBalance: true } },
+      },
     });
     if (!request) throw new NotFoundException('Leave request not found.');
 
@@ -509,8 +792,8 @@ export class LeaveService {
       throw new ConflictException(`This request has already been ${request.status.toLowerCase()}.`);
     }
 
-    const currentApprover = await this.resolveCurrentApprover(request.employeeId);
-    const isCurrentApprover = currentApprover === callerEmployeeId;
+    const approval = await this.resolveApprover(request.employeeId);
+    const isCurrentApprover = approval.approverId === callerEmployeeId;
     const canReachEmployee = await this.permissions.canAccessEmployee(
       callerEmployeeId,
       scope,
@@ -525,14 +808,15 @@ export class LeaveService {
     // approved since this one was submitted.
     if (decision === LeaveRequestStatus.APPROVED && request.leaveType.requiresBalance) {
       const year = leaveYearOf(request.startDate);
-      const summary = await this.getBalances(callerEmployeeId, scope, {
-        employeeId: request.employeeId,
+      const balance = await this.computeBalance(
+        this.prisma,
+        request.employeeId,
+        request.leaveType,
         year,
-      });
-      const forType = summary.balances.find((b) => b.leaveTypeId === request.leaveTypeId);
-      // This request is PENDING, so it is already inside remainingDays. Adding
-      // it back gives what would remain if it were approved.
-      const remainingIfApproved = (forType?.remainingDays ?? 0) + this.num(request.days);
+      );
+      // This request is PENDING, so its days are already inside remainingDays.
+      // Adding them back gives what would remain if it were approved.
+      const remainingIfApproved = balance.remainingDays + this.num(request.days);
 
       if (this.num(request.days) > remainingIfApproved) {
         throw new BadRequestException(
@@ -551,6 +835,34 @@ export class LeaveService {
       },
       include: REQUEST_INCLUDE,
     });
+
+    // --- after the write ------------------------------------------------------
+    const ctx = this.contextOf(updated);
+    const deciderName = updated.decidedBy
+      ? `${updated.decidedBy.firstName} ${updated.decidedBy.lastName}`
+      : 'A manager';
+    const note = updated.decisionComment;
+
+    await this.audit.record({
+      actorId: callerEmployeeId,
+      action:
+        decision === LeaveRequestStatus.APPROVED
+          ? 'leave_request.approved'
+          : 'leave_request.rejected',
+      entityType: 'leave_request',
+      entityId: updated.id,
+      summary: `${deciderName} ${decision.toLowerCase()} ${ctx.employeeName}'s ${ctx.leaveTypeName}, ${LeaveNotifications.formatDateRange(ctx.startDate, ctx.endDate)} (${ctx.days} day(s))${note ? ` — "${note}"` : ''}`,
+      before: { status: LeaveRequestStatus.PENDING },
+      after: { status: decision, decidedById: callerEmployeeId, comment: note },
+    });
+
+    // B / C. Tell the employee either way. A rejection carries the reason,
+    // because "no" without a reason is the complaint every HR system gets.
+    await this.notifications.notify(
+      decision === LeaveRequestStatus.APPROVED
+        ? LeaveNotifications.approvedToEmployee(updated.employeeId, ctx, deciderName, note)
+        : LeaveNotifications.rejectedToEmployee(updated.employeeId, ctx, deciderName, note),
+    );
 
     this.logger.log(`Leave request ${id} ${decision.toLowerCase()} by ${callerEmployeeId}`);
 
@@ -594,11 +906,54 @@ export class LeaveService {
       );
     }
 
+    const wasApproved = request.status === LeaveRequestStatus.APPROVED;
+    const wasAutoApproved = request.autoApproved;
+
     const updated = await this.prisma.leaveRequest.update({
       where: { id },
       data: { status: LeaveRequestStatus.CANCELLED, cancelledAt: new Date() },
       include: REQUEST_INCLUDE,
     });
+
+    // --- after the write ------------------------------------------------------
+    const ctx = this.contextOf(updated);
+    const canceller = callerEmployeeId
+      ? await this.prisma.employee.findUnique({
+          where: { id: callerEmployeeId },
+          select: { firstName: true, lastName: true },
+        })
+      : null;
+    const cancelledByName = canceller
+      ? `${canceller.firstName} ${canceller.lastName}`
+      : ctx.employeeName;
+
+    await this.audit.record({
+      actorId: callerEmployeeId,
+      action: 'leave_request.cancelled',
+      entityType: 'leave_request',
+      entityId: updated.id,
+      summary: `${cancelledByName} withdrew ${ctx.employeeName}'s ${ctx.leaveTypeName}, ${LeaveNotifications.formatDateRange(ctx.startDate, ctx.endDate)} (${ctx.days} day(s)) — was ${wasApproved ? 'approved' : 'pending'}`,
+      before: { status: wasApproved ? LeaveRequestStatus.APPROVED : LeaveRequestStatus.PENDING },
+      after: { status: LeaveRequestStatus.CANCELLED },
+    });
+
+    // D. Tell the manager — but only where manager awareness is required.
+    //
+    // A request that was auto-approved never involved a manager, so telling
+    // one now would be noise about something they were never asked about.
+    if (!wasAutoApproved) {
+      const approval = await this.resolveApprover(updated.employeeId);
+      if (approval.approverId && approval.approverId !== callerEmployeeId) {
+        await this.notifications.notify(
+          LeaveNotifications.cancelledToApprover(
+            approval.approverId,
+            ctx,
+            wasApproved,
+            cancelledByName,
+          ),
+        );
+      }
+    }
 
     return this.shapeRequest(updated);
   }

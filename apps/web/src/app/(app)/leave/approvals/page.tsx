@@ -3,6 +3,12 @@
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 
+import {
+  DeepLinkNotice,
+  highlightClass,
+  useDeepLinkTarget,
+  useScrollToTarget,
+} from '@/components/deep-link';
 import { formatDateRange, LeaveStatusBadge } from '@/components/leave-status-badge';
 import { EmptyState, ErrorBanner, inputClass, ScopeNotice, Spinner } from '@/components/ui';
 import { api, ApiError } from '@/lib/api';
@@ -20,23 +26,27 @@ export default function LeaveApprovalsPage() {
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [comments, setComments] = useState<Record<string, string>>({});
+  // Arriving from a notification: `?request=<id>`. The queue is widened to
+  // everything visible so the linked request is definitely in the list — it
+  // may already have been decided by someone else by the time it is opened.
+  const target = useDeepLinkTarget();
   const [showAll, setShowAll] = useState(false);
 
   const load = useCallback(async () => {
     setError(null);
     try {
-      const query = showAll
-        ? 'pageSize=100'
-        : 'awaitingMyDecision=true&pageSize=100';
+      const query = showAll || target ? 'pageSize=100' : 'awaitingMyDecision=true&pageSize=100';
       setData(await api<LeaveRequestsResponse>(`/api/leave/requests?${query}`));
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not load leave requests.');
     }
-  }, [showAll]);
+  }, [showAll, target]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  useScrollToTarget(target, data);
 
   async function decide(id: string, action: 'approve' | 'reject') {
     setBusyId(id);
@@ -62,10 +72,14 @@ export default function LeaveApprovalsPage() {
         {data && <ScopeNotice scope={data.scope} total={data.total} />}
       </div>
 
-      <label className="flex items-center gap-2 text-sm">
-        <input type="checkbox" checked={showAll} onChange={(e) => setShowAll(e.target.checked)} />
-        Show all requests I can see, not just those awaiting my decision
-      </label>
+      <DeepLinkNotice target={target} label="leave request" />
+
+      {!target && (
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={showAll} onChange={(e) => setShowAll(e.target.checked)} />
+          Show all requests I can see, not just those awaiting my decision
+        </label>
+      )}
 
       {error && <ErrorBanner message={error} onRetry={() => void load()} />}
       {!data && !error && <Spinner />}
@@ -86,7 +100,11 @@ export default function LeaveApprovalsPage() {
           {data.items.map((req) => {
             const actionable = req.status === 'PENDING';
             return (
-              <li key={req.id} className="rounded-lg border border-[var(--border)] p-4">
+              <li
+                key={req.id}
+                id={`record-${req.id}`}
+                className={`rounded-lg border border-[var(--border)] p-4 ${highlightClass(req.id, target)}`}
+              >
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
                     <div className="flex flex-wrap items-center gap-2">

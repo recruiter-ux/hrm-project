@@ -78,7 +78,9 @@ export default function EmployeesPage() {
       {data && data.items.length === 0 && !loading && (
         <EmptyState
           title="No employees match"
-          hint={search ? 'Try a different search term.' : 'Nothing is visible at your access level.'}
+          hint={
+            search ? 'Try a different search term.' : 'Nothing is visible at your access level.'
+          }
         />
       )}
 
