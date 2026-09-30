@@ -6,14 +6,18 @@
 >
 > **Keep it current.** When a decision changes, edit this file in the same
 > commit as the code change.
+>
+> **New here? Read [§14 Handover](#14-handover--read-this-first) first.** It
+> says what is done, what is left, why each significant decision was made, and
+> how to work with the person directing this build.
 
-**Last updated:** 2026-09-29 — Leave Management completed: notifications (in-app
-
-- email), audit log, concurrency protection, and the first automated test suite
-  **Company:** Hazel Mobile (AI and mobility apps studio)
-  **Product:** Velixa HR — internal HR platform
-  **Directed by:** a non-developer product owner, module by module, across many
-  separate sessions. Favour clarity and explicit comments over cleverness.
+|                  |                                                                                                                                                |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Company**      | Hazel Mobile — an AI and mobility apps studio                                                                                                  |
+| **Product**      | Velixa HR — internal HR platform                                                                                                               |
+| **Directed by**  | Zeshan Javed, product owner, **not a developer by background** — module by module, across many separate sessions that each start cold          |
+| **House style**  | Favour clarity and explicit comments over cleverness                                                                                           |
+| **Last updated** | 2026-09-30 — handover (§14). Leave Management complete: notifications, email, audit log, concurrency protection, 132 automated tests, CI green |
 
 ---
 
@@ -681,6 +685,7 @@ treatment.**
 
 When starting a new session on this project:
 
+0. **If this is your first session on the project, read §14 first.**
 1. Read this file and `README.md`.
 2. `npm run db:up` — start Postgres and Redis.
 3. `npm test` — 132 tests. If they pass, the stack is wired up correctly.
@@ -1413,3 +1418,156 @@ only) and shown as **Change log** on the Leave policy settings screen.
 
 No global audit browser, and no audit yet from the Core HR or Auth modules —
 `AuditService` is global and they should start calling it.
+
+---
+
+## 14. Handover — read this first
+
+> **Written 2026-09-30, at a clean stopping point.** The project changed hands
+> here (a different Claude account picks it up), so this section states exactly
+> where things stand and carries across the working context that would
+> otherwise be lost. Nothing was mid-flight when this was written.
+
+### Status in one line
+
+**Phase 0, Phase 1 and Phase 2 Module 1 (Leave Management) are complete,
+verified in a browser, covered by 132 automated tests, and green in CI.**
+Nothing is half-built.
+
+### Exactly what is done
+
+| Area                                            | State                                                                                                           |
+| ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Monorepo, Docker, CI                            | Done. CI runs lint, build **and tests** on every push.                                                          |
+| Core HR schema + employment history             | Done, with the effective-dated invariant enforced at three layers (§8).                                         |
+| Authentication, refresh rotation, lockout       | Done (§8).                                                                                                      |
+| Permission scopes (SELF/TEAM/DEPARTMENT/GLOBAL) | Done and tested (§8, §12).                                                                                      |
+| Employee CRUD, documents, org chart             | Done (§8).                                                                                                      |
+| **Leave Management**                            | **Done** (§10) — types, effective-dated policies, balances, requests, approvals, cancellation, archive/restore. |
+| **Notifications (in-app + email)**              | **Done** (§11) — reusable by every future module.                                                               |
+| **Audit log**                                   | **Done** (§13) — generic, every module writes to it.                                                            |
+| **Automated tests**                             | **Done** (§12) — 132 tests, unit + integration against real Postgres.                                           |
+
+### Exactly what is half-built
+
+**Nothing.** There is no partially-implemented feature, no stashed work, no
+commented-out branch waiting to be finished. The working tree was clean and in
+sync with `origin/main` at handover.
+
+The closest thing to "half" is that **three platform services were built for
+Leave and are only used by Leave** — notifications, email and the audit log are
+all deliberately generic (§11, §13) but no other module calls them yet. That is
+intended, not unfinished.
+
+### Exactly what is left
+
+In the order it is worth doing:
+
+1. **User account provisioning** — the biggest real gap, and it blocks actual
+   use. Creating an employee does **not** create a login; accounts exist only
+   because the seed script writes them. A real new hire added through the UI
+   today cannot sign in. Needs an admin screen to create a `User` and grant
+   AccessRoles, plus an invite/set-password flow. The email infrastructure it
+   needs now exists (§11), which is why this is the natural next job.
+2. **Public holiday calendar.** Only weekends are excluded today, so leave over
+   Eid or Christmas consumes those days. `working-days.ts` is the only file
+   that changes, and the request form already asks the API for the count, so
+   the UI follows automatically.
+3. **Department and Role (job title) admin screens.** Both seeded, neither
+   editable in the UI.
+4. **Team leave calendar** — who is off when, which is what a manager actually
+   wants before approving.
+5. **Per-employee balance override UI.** `POST /api/leave/balances` works and is
+   tested, but has no screen.
+6. **Accrual and automatic carry-forward roll-over**, and employment-based
+   proration for mid-year joiners.
+7. **The remaining modules**, in the planned order: Attendance & Shifts →
+   Recruitment/ATS → Dashboards → Reporting. Later: Payroll, Performance, AI.
+
+Smaller items are listed under "What is NOT built" in §10 and "Known gaps in
+coverage" in §12.
+
+### The decisions that shaped this, and why
+
+Do not re-open these without a reason; each was chosen deliberately and the
+alternatives were considered.
+
+| Decision                                                       | Why                                                                                                                                                                                                                                                 | Where   |
+| -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| **`Role` means job title, `AccessRole` means permission set**  | Promoting an engineer must not silently grant access to salary data. Zeshan corrected an early wrong guess here — do not conflate them again.                                                                                                       | §4      |
+| **Leave policy is DATA, not code**                             | Leadership requirement: HR changes leave types, quotas and rules through the dashboard without a developer. Nothing in application code knows "Annual Leave" exists.                                                                                | §10     |
+| **Quotas are effective-dated, never overwritten**              | Changing a quota opens a new dated version and closes the old one, so _"what was the quota last March?"_ still answers correctly after a July change.                                                                                               | §10     |
+| **The same effective-dated pattern is reused, not reinvented** | `LeaveTypePolicy` is `EmploymentAssignment` applied to policy instead of people. Use this recipe for any future policy area — probation rules, notice periods, shift premiums.                                                                      | §10     |
+| **Database constraints, not just service checks**              | A partial unique index for "one open assignment per employee", a `btree_gist` EXCLUDE for "no overlapping policy versions". Both hand-written into migrations because Prisma cannot express them. Both proved by attempting a violation in raw SQL. | §4, §10 |
+| **Balances are derived, never stored**                         | Summing requests on read means cancelling frees days automatically, with nothing to un-deduct.                                                                                                                                                      | §10     |
+| **`PermissionScope` on the grant, not the permission**         | "Can read leave requests" is not one permission, it is four. This is the single most important design decision in the codebase.                                                                                                                     | §8      |
+| **Email is queued, never sent inside a transaction**           | A dead mail server must not be able to roll back an approved leave request. There is a test that breaks the transport mid-approval to prove it.                                                                                                     | §11     |
+| **Notifications are idempotent at the database level**         | A unique `dedupeKey` derived from the event, so a retry or double-click produces exactly one alert. Not a check that could race.                                                                                                                    | §11     |
+| **Never query the main pool inside a transaction**             | This caused a production-grade deadlock and a red CI build. Read the box in §10 before adding any query inside `$transaction`.                                                                                                                      | §10     |
+| **npm workspaces, not Turborepo/Nx**                           | One tool, no extra config, no build-graph concepts to learn. Revisit only if builds get slow.                                                                                                                                                       | §2      |
+| **Single-tenant by design**                                    | One company, one database, no `organisationId` anywhere. A significant refactor if Velixa HR is ever sold externally — deliberately deferred rather than paying the complexity now for a maybe.                                                     | §6      |
+
+### How to work on this project
+
+This is the context a new session has no other way of knowing.
+
+**Zeshan is the product owner and is not a developer by background.** He directs
+the build module by module, across many separate sessions that each start cold.
+In practice that means:
+
+- **Explain decisions in plain English**, not only in code comments.
+- **Verification steps must be followable without reading source.** "Open this
+  URL and check the three quotas read 8, 6 and 6" — not "run the test suite and
+  read the assertions".
+- **Assume the next session starts with nothing.** This file is the handoff.
+  Keep it current _in the same commit_ as the code change, not afterwards.
+- **Flag what is cheap to change now and expensive later.** He may not spot
+  those trade-offs unprompted, and several of the best decisions above came
+  from exactly that prompting.
+- **Build the missing prerequisite rather than listing it as deferred.** Tests
+  and notifications were each carried for three phases under "not built yet"
+  before he asked, reasonably, why they had not simply been added. If a stated
+  acceptance criterion cannot be met with what exists, build the missing piece
+  and say so — or say in the same message what it would take. Do not put it in
+  a "known limitations" list and move on.
+- **"Green locally" and "green in CI" are two different claims.** He said this
+  explicitly, and he was right: a pool-starvation deadlock passed on this
+  machine and failed on a smaller CI runner. Confirm the Actions tab.
+
+### Environment quirks that will waste an hour otherwise
+
+- ⚠️ **Never run `npm run build` while `npm run dev` is running.** Both write to
+  `apps/web/.next`; the production build clobbers the dev server's chunks and
+  every page then 500s with `Cannot find module './NNN.js'`. Recovery: stop
+  dev, delete `apps/web/.next`, rebuild. This has cost time twice.
+- **Docker on this machine** needed virtualization enabled in BIOS plus
+  `wsl --install`. If Docker hangs rather than erroring, that is the cause.
+- **Windows/PowerShell**: `&&` is not supported in PowerShell 5.1; `-Form` is
+  not available (use `curl.exe`); `.ps1` files are read as ANSI so em-dashes
+  break parsing; heredocs mangle commit messages (use `git commit -F file`).
+  Prefer Node scripts over shell for anything with quoting.
+- **`prisma migrate deploy` does not regenerate the client.** Run
+  `npm run prisma:generate` afterwards or you get phantom type errors.
+- **Two migrations contain hand-written SQL** appended after the Prisma block
+  (the partial unique index and the `btree_gist` EXCLUDE constraint). If either
+  migration is ever regenerated, that SQL must be re-added by hand.
+
+### Verifying the handover in five minutes
+
+```bash
+npm run db:up          # Postgres + Redis
+npm test               # 132 tests — the real proof the stack is sound
+npm run dev            # http://localhost:3000
+```
+
+Sign in as `sana.iqbal@hazelmobile.com` / `Password123!` and check:
+
+1. **Leave policy** shows Annual 6, Casual 8, Sick 6, Unpaid 0 · no balance
+   needed · auto-approves.
+2. Clicking **Casual Leave** shows two policy versions — the January one still
+   reading 5 days — plus the 2026 entitlement breakdown and a **Change log**.
+3. Sign in as `zara.ahmed@hazelmobile.com`, request leave, then as
+   `omar.farooq@hazelmobile.com` check the **bell** in the header, open the
+   notification, and approve from the highlighted row.
+
+If all three work, the handover is sound.
