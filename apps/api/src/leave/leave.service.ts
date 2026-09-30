@@ -5,6 +5,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { LeaveRequestStatus, PermissionScope, type Prisma } from '@prisma/client';
 
@@ -129,52 +130,119 @@ export class LeaveService {
   // ---------------------------------------------------------------------------
 
   /**
-   * One leave type, one employee, one year — the whole picture.
+   * ⚠️ THE BALANCE CALCULATION IS SPLIT IN TWO, AND THE SPLIT IS NOT COSMETIC.
    *
-   * Takes a database client so it can run either normally or inside the
-   * per-employee lock taken during submission.
+   * A person's remaining days come from two very different kinds of data:
+   *
+   *   ENTITLEMENT   the policy for that year, plus any HR override. Nothing a
+   *                 colleague does — or that this person does in another tab —
+   *                 can change it while a request is being submitted.
+   *
+   *   CONSUMPTION   the days this employee has already used or reserved. This
+   *                 is exactly what two simultaneous submissions fight over,
+   *                 so it MUST be read inside the lock.
+   *
+   * Keeping them apart is what lets the locked transaction stay tiny and, far
+   * more importantly, touch ONLY its own connection. See `submitUnderLock`.
    */
-  private async computeBalance(
-    db: DbClient,
-    employeeId: string,
-    type: { id: string; code: string; name: string; requiresBalance: boolean },
-    year: number,
-  ): Promise<BalanceSummary> {
-    const [override, requests, calculated] = await Promise.all([
-      db.leaveBalance.findUnique({
-        where: {
-          employeeId_leaveTypeId_year: { employeeId, leaveTypeId: type.id, year },
-        },
-      }),
-      db.leaveRequest.findMany({
-        where: {
-          employeeId,
-          leaveTypeId: type.id,
-          status: { in: ACTIVE_STATUSES },
-          startDate: {
-            gte: new Date(Date.UTC(year, 0, 1)),
-            lte: new Date(Date.UTC(year, 11, 31)),
-          },
-        },
-        select: { days: true, status: true },
-      }),
-      this.policies.calculateEntitlement(type.id, year),
-    ]);
 
-    const usedDays = requests
-      .filter((r) => r.status === LeaveRequestStatus.APPROVED)
-      .reduce((sum, r) => sum + this.num(r.days), 0);
-    const pendingDays = requests
-      .filter((r) => r.status === LeaveRequestStatus.PENDING)
-      .reduce((sum, r) => sum + this.num(r.days), 0);
+  /** Contention-free. Always read on the main pool, never inside a transaction. */
+  private async resolveEntitlement(
+    employeeId: string,
+    leaveTypeId: string,
+    year: number,
+  ): Promise<{
+    entitledDays: number;
+    isOverridden: boolean;
+    carriedForwardDays: number;
+    breakdown: EntitlementBreakdownRow[];
+  }> {
+    const [override, calculated] = await Promise.all([
+      this.prisma.leaveBalance.findUnique({
+        where: { employeeId_leaveTypeId_year: { employeeId, leaveTypeId, year } },
+      }),
+      this.policies.calculateEntitlement(leaveTypeId, year),
+    ]);
 
     const isOverridden =
       override?.entitlementOverrideDays !== null && override?.entitlementOverrideDays !== undefined;
 
-    const entitledDays = isOverridden
-      ? this.num(override.entitlementOverrideDays)
-      : calculated.entitledDays;
-    const carriedForwardDays = this.num(override?.carriedForwardDays);
+    return {
+      entitledDays: isOverridden
+        ? this.num(override.entitlementOverrideDays)
+        : calculated.entitledDays,
+      isOverridden,
+      carriedForwardDays: this.num(override?.carriedForwardDays),
+      breakdown: isOverridden ? [] : calculated.breakdown,
+    };
+  }
+
+  /**
+   * The contended half: days already committed or reserved, for one type, in
+   * one year.
+   *
+   * Takes a client so the submission path can run it on the transaction that
+   * holds the row lock — and ONLY on that client.
+   */
+  private async sumActiveDays(
+    db: DbClient,
+    employeeId: string,
+    leaveTypeId: string,
+    year: number,
+  ): Promise<{ usedDays: number; pendingDays: number }> {
+    const requests = await db.leaveRequest.findMany({
+      where: {
+        employeeId,
+        leaveTypeId,
+        status: { in: ACTIVE_STATUSES },
+        startDate: {
+          gte: new Date(Date.UTC(year, 0, 1)),
+          lte: new Date(Date.UTC(year, 11, 31)),
+        },
+      },
+      select: { days: true, status: true },
+    });
+
+    return {
+      usedDays: requests
+        .filter((r) => r.status === LeaveRequestStatus.APPROVED)
+        .reduce((sum, r) => sum + this.num(r.days), 0),
+      pendingDays: requests
+        .filter((r) => r.status === LeaveRequestStatus.PENDING)
+        .reduce((sum, r) => sum + this.num(r.days), 0),
+    };
+  }
+
+  /** Days rounded to two decimals, the way every figure in this module is. */
+  private remainingDays(
+    entitlement: { entitledDays: number; carriedForwardDays: number },
+    consumption: { usedDays: number; pendingDays: number },
+  ): number {
+    return Number(
+      (
+        entitlement.entitledDays +
+        entitlement.carriedForwardDays -
+        consumption.usedDays -
+        consumption.pendingDays
+      ).toFixed(2),
+    );
+  }
+
+  /**
+   * One leave type, one employee, one year — the whole picture.
+   *
+   * The READ path only: the balances screen and the approval re-check. Both
+   * run outside any transaction, so both halves use the main pool.
+   */
+  private async computeBalance(
+    employeeId: string,
+    type: { id: string; code: string; name: string; requiresBalance: boolean },
+    year: number,
+  ): Promise<BalanceSummary> {
+    const [entitlement, consumption] = await Promise.all([
+      this.resolveEntitlement(employeeId, type.id, year),
+      this.sumActiveDays(this.prisma, employeeId, type.id, year),
+    ]);
 
     return {
       leaveTypeId: type.id,
@@ -182,15 +250,13 @@ export class LeaveService {
       name: type.name,
       requiresBalance: type.requiresBalance,
       year,
-      entitledDays,
-      isOverridden,
-      carriedForwardDays,
-      usedDays,
-      pendingDays,
-      remainingDays: Number(
-        (entitledDays + carriedForwardDays - usedDays - pendingDays).toFixed(2),
-      ),
-      entitlementBreakdown: isOverridden ? [] : calculated.breakdown,
+      entitledDays: entitlement.entitledDays,
+      isOverridden: entitlement.isOverridden,
+      carriedForwardDays: entitlement.carriedForwardDays,
+      usedDays: consumption.usedDays,
+      pendingDays: consumption.pendingDays,
+      remainingDays: this.remainingDays(entitlement, consumption),
+      entitlementBreakdown: entitlement.breakdown,
     };
   }
 
@@ -210,7 +276,7 @@ export class LeaveService {
     });
 
     const balances = await Promise.all(
-      types.map((type) => this.computeBalance(this.prisma, employeeId, type, year)),
+      types.map((type) => this.computeBalance(employeeId, type, year)),
     );
 
     return { employeeId, year, balances };
@@ -553,6 +619,17 @@ export class LeaveService {
     const approval = await this.resolveApprover(employeeId);
     const autoApprove = !policy.approvalRequired;
 
+    // ⚠️ RESOLVED BEFORE THE LOCK IS TAKEN, DELIBERATELY.
+    //
+    // Entitlement depends on policy and on any HR override — neither of which
+    // a competing submission can change. Reading it here rather than inside
+    // the transaction is what keeps the transaction to a single database
+    // connection. See the comment on `submitUnderLock` for what happened when
+    // it did not.
+    const entitlement = leaveType.requiresBalance
+      ? await this.resolveEntitlement(employeeId, leaveType.id, leaveYearOf(startDate))
+      : null;
+
     // --- 6 and 7, then the insert, all under one lock -------------------------
     const created = await this.submitUnderLock({
       employeeId,
@@ -564,6 +641,7 @@ export class LeaveService {
       reason: dto.reason.trim(),
       approverId: approval.approverId,
       autoApprove,
+      entitlement,
     });
 
     // --- everything below happens AFTER the transaction has committed ---------
@@ -607,6 +685,33 @@ export class LeaveService {
    * The overlap and balance checks are repeated in here deliberately. The
    * copies outside the lock are not redundant: they produce a fast, friendly
    * error in the ordinary case without paying for a lock.
+   *
+   * ⚠️⚠️ NEVER QUERY `this.prisma` FROM INSIDE THIS TRANSACTION. Use `tx`.
+   *
+   * This cost a red CI build, and the failure mode is worth understanding
+   * because it will happen again to anyone who forgets.
+   *
+   * An interactive transaction holds ONE connection from Prisma's pool for its
+   * whole lifetime. The pool defaults to `physical_cores * 2 + 1` — on a
+   * two-core CI runner, five. This method used to call a helper that read the
+   * policy through `this.prisma`, asking the pool for a SECOND connection
+   * while still holding the first.
+   *
+   * With five people submitting at once:
+   *   - five transactions each take one connection: the pool is empty
+   *   - each then waits for a connection to read the policy
+   *   - none can finish, so none gives its connection back
+   *   - every one dies at the 5-second transaction timeout (P2028)
+   *
+   * A textbook pool-starvation deadlock. Locally it was invisible, because a
+   * developer machine with sixteen logical cores has a pool of thirty-three
+   * and plenty of slack. It only appeared on the smaller machine.
+   *
+   * The fix is structural rather than a bigger pool: everything that does not
+   * need the lock is resolved BEFORE the transaction opens (see
+   * `resolveEntitlement`), and what remains inside touches `tx` alone. The
+   * transaction is now four statements long and needs exactly one connection,
+   * so it cannot starve however many people submit at once.
    * =========================================================================
    */
   private async submitUnderLock(input: {
@@ -619,62 +724,96 @@ export class LeaveService {
     reason: string;
     approverId: string | null;
     autoApprove: boolean;
+    /** Pre-resolved outside the lock. Null when the type needs no balance. */
+    entitlement: { entitledDays: number; carriedForwardDays: number } | null;
   }) {
-    const { employeeId, leaveType, startDate, endDate, days } = input;
+    const { employeeId, leaveType, startDate, endDate, days, entitlement } = input;
 
-    return this.prisma.$transaction(async (tx) => {
-      // Take the lock. Nothing is read from the result — the point is the wait.
-      await tx.$queryRaw`SELECT id FROM employees WHERE id = ${employeeId} FOR UPDATE`;
+    try {
+      return await this.prisma.$transaction(
+        async (tx) => {
+          // Take the lock. Nothing is read from the result — the wait is the point.
+          await tx.$queryRaw`SELECT id FROM employees WHERE id = ${employeeId} FOR UPDATE`;
 
-      // --- 6. overlap ---------------------------------------------------------
-      const clash = await tx.leaveRequest.findFirst({
-        where: {
-          employeeId,
-          status: { in: ACTIVE_STATUSES },
-          startDate: { lte: endDate },
-          endDate: { gte: startDate },
+          // --- 6. overlap -----------------------------------------------------
+          const clash = await tx.leaveRequest.findFirst({
+            where: {
+              employeeId,
+              status: { in: ACTIVE_STATUSES },
+              startDate: { lte: endDate },
+              endDate: { gte: startDate },
+            },
+            include: { leaveType: { select: { name: true } } },
+          });
+
+          if (clash) {
+            throw new ConflictException(
+              `This overlaps an existing ${clash.status.toLowerCase()} request (${clash.leaveType.name}, ${formatDate(clash.startDate)} to ${formatDate(clash.endDate)}).`,
+            );
+          }
+
+          // --- 7. balance -----------------------------------------------------
+          // Only the CONSUMED half is read here; entitlement came in already
+          // resolved. One connection, four statements, in and out.
+          if (entitlement) {
+            const year = leaveYearOf(startDate);
+            const consumption = await this.sumActiveDays(tx, employeeId, leaveType.id, year);
+            const remaining = this.remainingDays(entitlement, consumption);
+
+            if (days > remaining) {
+              throw new BadRequestException(
+                `Not enough ${leaveType.name} left: this request is ${days} day${days === 1 ? '' : 's'} but only ${remaining} remain${remaining === 1 ? 's' : ''} for ${year}. Pending requests already reserve part of the balance.`,
+              );
+            }
+          }
+
+          return tx.leaveRequest.create({
+            data: {
+              employeeId,
+              leaveTypeId: leaveType.id,
+              startDate,
+              endDate,
+              days,
+              reason: input.reason,
+              status: input.autoApprove ? LeaveRequestStatus.APPROVED : LeaveRequestStatus.PENDING,
+              approverId: input.approverId,
+              appliedPolicyId: input.policyId,
+              autoApproved: input.autoApprove,
+              decidedAt: input.autoApprove ? new Date() : null,
+              decisionComment: input.autoApprove
+                ? `Automatically approved — ${leaveType.name} does not require approval.`
+                : null,
+            },
+            include: REQUEST_INCLUDE,
+          });
         },
-        include: { leaveType: { select: { name: true } } },
-      });
-
-      if (clash) {
-        throw new ConflictException(
-          `This overlaps an existing ${clash.status.toLowerCase()} request (${clash.leaveType.name}, ${formatDate(clash.startDate)} to ${formatDate(clash.endDate)}).`,
+        {
+          // A row lock serialises writers by design, so a queue is normal and
+          // not a symptom. These are deliberately far above what the work
+          // needs (about 20ms) — they exist so a burst of submissions waits
+          // its turn instead of erroring, while still failing eventually
+          // rather than hanging for ever.
+          maxWait: 10_000,
+          timeout: 15_000,
+        },
+      );
+    } catch (error) {
+      const code = (error as { code?: string }).code;
+      // P2024: could not get a connection from the pool.
+      // P2028: the transaction ran past its timeout.
+      // Either means the system is saturated, not that the request was wrong —
+      // so say so, and say it is worth retrying, rather than returning a bare
+      // 500 that reads like a bug in the request.
+      if (code === 'P2024' || code === 'P2028') {
+        this.logger.error(
+          `Leave submission for ${employeeId} could not complete (${code}). The database connection pool is saturated.`,
+        );
+        throw new ServiceUnavailableException(
+          'The system is busy and could not record your request. Nothing was saved — please try again in a moment.',
         );
       }
-
-      // --- 7. balance ---------------------------------------------------------
-      if (leaveType.requiresBalance) {
-        const year = leaveYearOf(startDate);
-        const balance = await this.computeBalance(tx, employeeId, leaveType, year);
-
-        if (days > balance.remainingDays) {
-          throw new BadRequestException(
-            `Not enough ${leaveType.name} left: this request is ${days} day${days === 1 ? '' : 's'} but only ${balance.remainingDays} remain${balance.remainingDays === 1 ? 's' : ''} for ${year}. Pending requests already reserve part of the balance.`,
-          );
-        }
-      }
-
-      return tx.leaveRequest.create({
-        data: {
-          employeeId,
-          leaveTypeId: leaveType.id,
-          startDate,
-          endDate,
-          days,
-          reason: input.reason,
-          status: input.autoApprove ? LeaveRequestStatus.APPROVED : LeaveRequestStatus.PENDING,
-          approverId: input.approverId,
-          appliedPolicyId: input.policyId,
-          autoApproved: input.autoApprove,
-          decidedAt: input.autoApprove ? new Date() : null,
-          decisionComment: input.autoApprove
-            ? `Automatically approved — ${leaveType.name} does not require approval.`
-            : null,
-        },
-        include: REQUEST_INCLUDE,
-      });
-    });
+      throw error;
+    }
   }
 
   /** Audit and notifications for a freshly created request. */
@@ -808,12 +947,7 @@ export class LeaveService {
     // approved since this one was submitted.
     if (decision === LeaveRequestStatus.APPROVED && request.leaveType.requiresBalance) {
       const year = leaveYearOf(request.startDate);
-      const balance = await this.computeBalance(
-        this.prisma,
-        request.employeeId,
-        request.leaveType,
-        year,
-      );
+      const balance = await this.computeBalance(request.employeeId, request.leaveType, year);
       // This request is PENDING, so its days are already inside remainingDays.
       // Adding them back gives what would remain if it were approved.
       const remainingIfApproved = balance.remainingDays + this.num(request.days);

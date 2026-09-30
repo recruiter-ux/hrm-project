@@ -17,6 +17,15 @@ import { workingDayRange } from './fixtures';
  * ⚠️ THIS TEST IS THE ONLY THING THAT PROVES THE LOCK IS THERE. Nothing about
  * the code reads as wrong without it; the bug only appears under simultaneous
  * load, which is exactly when nobody is watching.
+ *
+ * It is also the only thing standing between us and a POOL-STARVATION
+ * DEADLOCK. These tests run against a five-connection pool (see
+ * test-database.ts), the same size a two-core CI runner gets. The burst below
+ * opens five transactions at once, so the pool is exactly empty while they
+ * run: if any code path holds a transaction's connection and then asks the
+ * pool for another, nothing can finish and every request dies at the
+ * transaction timeout. That is not hypothetical — it is what happened, and it
+ * passed on a sixteen-core laptop the whole time.
  * =============================================================================
  */
 describe('Concurrent leave submissions (integration)', () => {

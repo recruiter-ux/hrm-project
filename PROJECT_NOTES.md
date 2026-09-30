@@ -960,6 +960,49 @@ serialises exactly the people who are competing — one person's submissions
 queue behind each other and nobody else is affected. Covered by
 `test/leave-concurrency.spec.ts`, including a five-way burst.
 
+#### ⚠️ Never query `this.prisma` from inside a transaction — use `tx`
+
+This is the single most important rule in this module, and it cost a red CI
+build the first time it was broken. Anyone adding a query inside
+`$transaction` needs to know why.
+
+**What happened.** The balance check inside the lock called a helper that read
+the leave policy through `this.prisma`. That asks Prisma's connection pool for
+a **second** connection while the transaction is still holding the first.
+
+Prisma sizes its pool from the machine: `physical_cores * 2 + 1`. A developer
+laptop with sixteen logical cores gets a pool of thirty-three, so there was
+always slack and it always passed. A CI runner has two physical cores — a pool
+of **five**. With five people submitting at once:
+
+1. five transactions each take one connection; the pool is now empty
+2. each then waits for a connection to read the policy
+3. none can finish, so none gives its connection back
+4. all five die at Prisma's 5-second transaction timeout (`P2028`)
+
+A textbook pool-starvation deadlock. In production it would mean five people
+requesting leave in the same moment all get an error instead of two clean
+approvals and three clean rejections.
+
+**The fix is structural, not a bigger pool.** Anything that does not need the
+lock is resolved *before* the transaction opens — entitlement comes from policy
+and any HR override, neither of which a competing submission can change. What
+remains inside touches `tx` alone: four statements, one connection, in and out.
+
+**Two guards so it cannot come back:**
+
+- The test suite pins `connection_limit=5` (`test/test-database.ts`), so every
+  developer runs against the same tight pool CI has. This class of bug now
+  fails on the machine of whoever writes it, not three days later in CI.
+- `submitUnderLock` translates `P2024` / `P2028` into a **503 "the system is
+  busy, nothing was saved, please try again"** rather than a bare 500 that
+  reads like a bug in the request.
+
+The transaction also carries explicit `maxWait: 10s` / `timeout: 15s`. A row
+lock serialises writers by design, so a queue is normal; the defaults (2s/5s)
+are too tight for a burst, and these are generous but still bounded so a real
+problem fails rather than hangs.
+
 ### Cancellation behaviour
 
 - **PENDING → CANCELLED** at any time by the employee.
@@ -1291,6 +1334,21 @@ duplicate prevention at the database level, the centre, delivery, retries,
 `SKIPPED`, **a broken mail server not rolling back an approval**, audit);
 concurrency (two tabs, a five-way burst, an exact duplicate, and that one
 person's submissions do not block another's).
+
+### "Jest did not exit one second after the test run has completed"
+
+This warning is printed at the end of every full run. It is **cosmetic**:
+
+- the exit code is 0
+- running with `--detectOpenHandles` reports **no** open handle
+- each suite on its own exits cleanly and prints nothing
+
+It is Prisma's engine taking marginally longer than Jest's one-second grace to
+release its connections after `$disconnect`. It has never affected a result.
+
+⚠️ **Do not "fix" it with `--forceExit`.** That would kill the process
+regardless, and would hide a genuine leak the day somebody introduces one. If
+this warning ever appears *alongside* a failure, investigate it properly.
 
 ### Known gaps in coverage
 
