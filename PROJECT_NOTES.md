@@ -985,7 +985,7 @@ requesting leave in the same moment all get an error instead of two clean
 approvals and three clean rejections.
 
 **The fix is structural, not a bigger pool.** Anything that does not need the
-lock is resolved *before* the transaction opens — entitlement comes from policy
+lock is resolved _before_ the transaction opens — entitlement comes from policy
 and any HR override, neither of which a competing submission can change. What
 remains inside touches `tx` alone: four statements, one connection, in and out.
 
@@ -1348,7 +1348,7 @@ release its connections after `$disconnect`. It has never affected a result.
 
 ⚠️ **Do not "fix" it with `--forceExit`.** That would kill the process
 regardless, and would hide a genuine leak the day somebody introduces one. If
-this warning ever appears *alongside* a failure, investigate it properly.
+this warning ever appears _alongside_ a failure, investigate it properly.
 
 ### Known gaps in coverage
 
